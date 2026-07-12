@@ -54,6 +54,7 @@
   .badge.blank{background:#eef0f4;color:var(--muted);}
   .cell-good{background:var(--good-bg);color:var(--good);font-weight:700;}
   .cell-bad{background:var(--bad-bg);color:var(--bad);font-weight:700;}
+  .cell-warn{background:var(--warn-bg);color:var(--warn);font-weight:700;}
   .dropzone{border:2px dashed var(--border);border-radius:var(--radius);padding:40px;text-align:center;color:var(--muted);cursor:pointer;background:#fafbfc;}
   .dropzone.drag{border-color:var(--accent);background:#eef3fe;color:var(--accent);}
   .modal-overlay{position:fixed;inset:0;background:rgba(20,24,33,.45);display:flex;align-items:center;justify-content:center;z-index:100;}
@@ -111,6 +112,22 @@ const GOALS = {
   dollars: { current: 0.90, b7: 0.10, b14: 0.00, b21: 0.00, b28: 0.00, blank: 0.00 },
   count:   { current: 0.63, b7: 0.10, b14: 0.05, b21: 0.01, b28: 0.01, blank: 0.20 }
 };
+
+// How much each bucket counts toward the overall composite score. Tune freely — must sum to 1.
+const IMPORTANCE = { current: 0.24, b7: 0.07, b14: 0.10, b21: 0.20, b28: 0.25, blank: 0.14 };
+const OVERALL_SCORE_GOAL = 0.82; // target composite score
+
+// Continuous 0-100% credit instead of a flat pass/fail: partial credit scales with how close
+// actual is to goal, so "barely missed" and "way over goal" don't score identically.
+function scoreFor(bucketKey, actualPct, goalPct){
+  if(bucketKey === 'current'){
+    if(goalPct <= 0) return 1;
+    return Math.max(0, Math.min(1, actualPct / goalPct));
+  }
+  if(actualPct <= goalPct) return 1;
+  if(goalPct <= 0) return 0;
+  return Math.max(0, Math.min(1, goalPct / actualPct));
+}
 
 const FIELDS_TO_COMPARE = ['store','supplier','product_code','style_name','color_desc','sidemark',
   'amount_ordered','units','promise_date','order_date','status','ordered_by','taken_by',
@@ -259,6 +276,52 @@ function render(){
 }
 
 // ============================================================
+// SCORECARD (composite of the Total row, weighted by IMPORTANCE)
+// ============================================================
+function renderScorecard(totals, totalAll, goals){
+  let composite = 0;
+  const rowsHtml = BUCKET_ORDER.map(b=>{
+    const actualPct = totalAll ? totals[b] / totalAll : 0;
+    const goalPct = goals[b];
+    const score = scoreFor(b, actualPct, goalPct);
+    const importance = IMPORTANCE[b];
+    composite += score * importance;
+    const scoreCls = score >= 0.9 ? 'cell-good' : score >= 0.6 ? 'cell-warn' : 'cell-bad';
+    const impCls = importance >= 0.20 ? 'cell-bad' : importance >= 0.10 ? 'cell-warn' : 'cell-good';
+    const goalDisplay = b === 'current' ? `≥ ${(goalPct*100).toFixed(0)}%` : `≤ ${(goalPct*100).toFixed(0)}%`;
+    return `<tr>
+      <td>${BUCKET_LABELS[b]}</td>
+      <td>${goalDisplay}</td>
+      <td>${(actualPct*100).toFixed(1)}%</td>
+      <td class="${scoreCls}">${(score*100).toFixed(0)}%</td>
+      <td class="${impCls}">${(importance*100).toFixed(0)}%</td>
+    </tr>`;
+  }).join('');
+  const compositeCls = composite >= OVERALL_SCORE_GOAL ? 'cell-good' : 'cell-bad';
+
+  return `
+    <div class="panel">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:10px;">
+        <h2 style="margin:0;font-size:15px;">Scorecard</h2>
+        <div style="font-size:13px;display:flex;align-items:center;gap:10px;">
+          <span style="color:var(--muted);">Composite Score</span>
+          <span class="${compositeCls}" style="padding:3px 10px;border-radius:20px;font-size:14px;">${(composite*100).toFixed(1)}%</span>
+          <span style="color:var(--muted);">vs. target ${(OVERALL_SCORE_GOAL*100).toFixed(0)}%</span>
+        </div>
+      </div>
+      <table>
+        <thead><tr><th>Bucket</th><th>Goal</th><th>Actual</th><th>Score</th><th>Importance</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+      <p style="color:var(--muted);font-size:12px;margin-top:12px;margin-bottom:0;">
+        Score = how close Actual is to Goal (100% if met/beat, partial credit scaled by the gap if missed).
+        Importance = each bucket's weight in the composite (edit <code>IMPORTANCE</code> in the source to retune).
+      </p>
+    </div>
+  `;
+}
+
+// ============================================================
 // MANAGER ROLLUP
 // ============================================================
 function renderRollup(){
@@ -299,6 +362,7 @@ function renderRollup(){
       <div class="stat"><div class="num">${active.length.toLocaleString()}</div><div class="label">Open POs</div></div>
       <div class="stat"><div class="num">${fmtMoney(active.reduce((s,r)=>s+(Number(r.total_cost)||0),0))}</div><div class="label">Total $ Open</div></div>
     </div>
+    ${renderScorecard(totals, totalAll, goals)}
     <div class="panel">
       <div class="toolbar">
         <span style="font-weight:700;">Metric:</span>
