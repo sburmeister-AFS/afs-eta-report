@@ -40,6 +40,9 @@
   .td-truncate-sm{max-width:160px;}
   tr.po-row{cursor:pointer;}
   tr.po-row:hover{background:#f2f5fc;}
+  .promise-cell{cursor:pointer;}
+  .promise-cell:hover{text-decoration:underline;text-decoration-style:dotted;}
+  .pending-flag{margin-left:6px;}
   .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;}
   .toolbar select, .toolbar input[type=text]{padding:7px 10px;border:1px solid var(--border);border-radius:7px;font-size:13px;background:#fff;}
   .toolbar label{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px;}
@@ -549,7 +552,7 @@ function renderOpenTable(){
               <td class="td-truncate" title="${escapeAttr((r.style_name||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
               <td>${r.ordered_by || '—'}</td>
               <td>${fmtDate(r.order_date)}</td>
-              <td>${fmtDate(r.promise_date)}</td>
+              <td class="promise-cell" data-po="${r.po_number}" title="Click to update the promise date">${fmtDate(r.promise_date)}${r.pending_promise_date ? ` <span class="badge b7 pending-flag" title="Unverified proposed date: ${fmtDate(r.pending_promise_date)} — not yet confirmed in RFMS">? ${fmtDate(r.pending_promise_date)}</span>` : ''}</td>
               <td><span class="badge ${bucketOf(r)}">${fmtPastDays(r)}</span></td>
               <td>${fmtMoney(r.total_cost)}</td>
               <td>${r.reference_number || ''}</td>
@@ -751,7 +754,8 @@ async function processUpload(openRowsRaw, filename){
         if(!valuesEqual(prev[f], row[f])) changes.push({ field: f, old: prev[f] ?? null, new: row[f] ?? null });
       });
       const wasInactive = prev.is_active === false;
-      upserts.push({ ...row, first_seen_batch_id: prev.first_seen_batch_id, first_seen_at: prev.first_seen_at, last_seen_batch_id: batchId, last_seen_at: nowIso, is_active: true });
+      const promiseDateChanged = changes.some(c=>c.field === 'promise_date');
+      upserts.push({ ...row, first_seen_batch_id: prev.first_seen_batch_id, first_seen_at: prev.first_seen_at, last_seen_batch_id: batchId, last_seen_at: nowIso, is_active: true, ...(promiseDateChanged ? { pending_promise_date: null } : {}) });
       if(changes.length){
         historyEvents.push({ po_number: row.po_number, batch_id: batchId, event_type: wasInactive ? 'reappeared' : 'updated', changes, detected_at: nowIso });
       } else if(wasInactive){
@@ -807,6 +811,12 @@ async function openHistoryModal(poNumber){
     else if(ev.event_type === 'updated'){
       body = (ev.changes||[]).map(c=>`<div class="tl-diff"><span class="f">${c.field}:</span> ${c.old ?? '—'} → <strong>${c.new ?? '—'}</strong></div>`).join('');
     }
+    else if(ev.event_type === 'manual_update'){
+      body = (ev.changes||[]).map(c=>`<div class="tl-diff"><span class="f">${c.field}:</span> ${c.old ?? '—'} → <strong>${c.new ?? '—'}</strong> <span style="color:var(--good);">(confirmed in RFMS)</span></div>`).join('');
+    }
+    else if(ev.event_type === 'unverified_update'){
+      body = (ev.changes||[]).map(c=>`<div class="tl-diff"><span class="f">${c.field}:</span> ${c.old ?? '—'} → <strong>${c.new ?? '—'}</strong> <span style="color:var(--warn);">(unverified — not yet confirmed in RFMS)</span></div>`).join('');
+    }
     return `<div class="tl-event">
       <div class="tl-date">${new Date(ev.detected_at).toLocaleString()}</div>
       <div class="tl-type">${ev.event_type}</div>
@@ -816,6 +826,76 @@ async function openHistoryModal(poNumber){
 
   showModal(`<span class="close" id="modalClose">&times;</span><h2>${poNumber}</h2>${header}<div class="timeline">${events}</div>`);
   document.getElementById('modalClose').addEventListener('click', closeModal);
+}
+
+// ============================================================
+// manual Promise Date edit (worked from the All Open POs page)
+// ============================================================
+function openPromiseEditModal(poNumber){
+  const row = state.poLines.find(r=>r.po_number === poNumber);
+  if(!row) return;
+  showModal(`
+    <span class="close" id="modalClose">&times;</span>
+    <h2>Update Promise Date</h2>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:14px;">
+      <strong>${poNumber}</strong> · ${row.supplier || ''} · ${row.style_name || ''}${row.color_desc ? (' · '+row.color_desc) : ''}<br>
+      Current promise date: <strong>${fmtDate(row.promise_date)}</strong>
+      ${row.pending_promise_date ? `<br>Pending unverified date: <strong>${fmtDate(row.pending_promise_date)}</strong>` : ''}
+    </div>
+    <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;">New promise date</label>
+    <input type="date" id="promiseDateInput" value="${row.promise_date || ''}" style="padding:8px 10px;border:1px solid var(--border);border-radius:7px;width:100%;margin-bottom:14px;">
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:6px;">
+      <input type="checkbox" id="rfmsCheckbox"> Updated in RFMS
+    </label>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:16px;">
+      Checked: this becomes the tracked promise date. Unchecked: logged as an <strong>unverified</strong> note only —
+      the tracked promise date won't change until RFMS is updated and this report is re-uploaded.
+    </p>
+    <div id="promiseError" class="pw-error hidden"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn secondary" id="promiseCancelBtn">Cancel</button>
+      <button class="btn" id="promiseSaveBtn">Save</button>
+    </div>
+  `);
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+  document.getElementById('promiseCancelBtn').addEventListener('click', closeModal);
+  document.getElementById('promiseSaveBtn').addEventListener('click', ()=>savePromiseUpdate(poNumber));
+}
+
+async function savePromiseUpdate(poNumber){
+  const row = state.poLines.find(r=>r.po_number === poNumber);
+  if(!row) return;
+  const newDate = document.getElementById('promiseDateInput').value || null;
+  const verified = document.getElementById('rfmsCheckbox').checked;
+  const btn = document.getElementById('promiseSaveBtn');
+  const errBox = document.getElementById('promiseError');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const nowIso = new Date().toISOString();
+  try{
+    if(verified){
+      const oldDate = row.promise_date;
+      const { error } = await sb.from('po_lines').update({ promise_date: newDate, pending_promise_date: null }).eq('po_number', poNumber);
+      if(error) throw error;
+      if(!valuesEqual(oldDate, newDate)){
+        const { error: histErr } = await sb.from('po_line_history').insert({ po_number: poNumber, batch_id: null, event_type: 'manual_update', changes: [{ field: 'promise_date', old: oldDate, new: newDate }], detected_at: nowIso });
+        if(histErr) throw histErr;
+      }
+      row.promise_date = newDate;
+      row.pending_promise_date = null;
+    } else {
+      const { error } = await sb.from('po_lines').update({ pending_promise_date: newDate }).eq('po_number', poNumber);
+      if(error) throw error;
+      const { error: histErr } = await sb.from('po_line_history').insert({ po_number: poNumber, batch_id: null, event_type: 'unverified_update', changes: [{ field: 'promise_date', old: row.promise_date, new: newDate }], detected_at: nowIso });
+      if(histErr) throw histErr;
+      row.pending_promise_date = newDate;
+    }
+    closeModal();
+    render();
+  } catch(err){
+    errBox.textContent = 'Error saving: ' + err.message;
+    errBox.classList.remove('hidden');
+    btn.disabled = false; btn.textContent = 'Save';
+  }
 }
 
 // ============================================================
@@ -845,6 +925,9 @@ function attachViewHandlers(){
         state.filters[btn.dataset.dim] = btn.dataset.value;
         render();
       });
+    });
+    document.querySelectorAll('td.promise-cell').forEach(td=>{
+      td.addEventListener('click', (e)=>{ e.stopPropagation(); openPromiseEditModal(td.dataset.po); });
     });
     document.getElementById('f-supplier')?.addEventListener('input', (e)=>{ state.filters.supplier = e.target.value; render(); });
     document.getElementById('f-search')?.addEventListener('input', (e)=>{ state.filters.search = e.target.value; render(); });
