@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ETA Report</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<style>
+  :root{
+    --bg:#f5f6f8; --panel:#ffffff; --border:#e2e4e9; --text:#1c2230; --muted:#6b7280;
+    --accent:#2f6fed; --accent-dark:#1f4fbb;
+    --good:#1a8754; --good-bg:#e8f7ee;
+    --bad:#c02b3a; --bad-bg:#fdeced;
+    --warn:#b4790a; --warn-bg:#fdf3e0;
+    --radius:10px;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:-apple-system,"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--text);font-size:14px;}
+  header{background:var(--panel);border-bottom:1px solid var(--border);padding:14px 22px;display:flex;align-items:center;gap:18px;position:sticky;top:0;z-index:20;}
+  header h1{font-size:17px;margin:0;font-weight:700;}
+  header .sub{color:var(--muted);font-size:12.5px;}
+  nav{display:flex;gap:4px;margin-left:auto;}
+  nav button{background:none;border:none;padding:9px 14px;border-radius:8px;font-size:13.5px;font-weight:600;color:var(--muted);cursor:pointer;}
+  nav button.active{background:var(--accent);color:#fff;}
+  nav button:hover:not(.active){background:#eef1f6;}
+  #adminBtn{border:1px solid var(--border);border-radius:8px;padding:8px 12px;background:#fff;cursor:pointer;font-size:13px;font-weight:600;color:var(--muted);}
+  #adminBtn.active{color:var(--good);border-color:var(--good);}
+  main{padding:22px;max-width:1400px;margin:0 auto;}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:18px;margin-bottom:18px;}
+  .stat-row{display:flex;gap:14px;margin-bottom:18px;flex-wrap:wrap;}
+  .stat{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;min-width:140px;}
+  .stat .num{font-size:22px;font-weight:700;}
+  .stat .label{color:var(--muted);font-size:12px;margin-top:2px;}
+  table{border-collapse:collapse;width:100%;font-size:13px;}
+  th{text-align:left;padding:8px 10px;border-bottom:2px solid var(--border);color:var(--muted);font-size:11.5px;text-transform:uppercase;letter-spacing:.03em;cursor:pointer;white-space:nowrap;}
+  th:hover{color:var(--text);}
+  td{padding:7px 10px;border-bottom:1px solid var(--border);white-space:nowrap;}
+  tr.po-row{cursor:pointer;}
+  tr.po-row:hover{background:#f2f5fc;}
+  .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;}
+  .toolbar select, .toolbar input[type=text]{padding:7px 10px;border:1px solid var(--border);border-radius:7px;font-size:13px;background:#fff;}
+  .toolbar label{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px;}
+  .btn{background:var(--accent);color:#fff;border:none;padding:8px 14px;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;}
+  .btn:hover{background:var(--accent-dark);}
+  .btn.secondary{background:#fff;color:var(--text);border:1px solid var(--border);}
+  .toggle-group{display:flex;border:1px solid var(--border);border-radius:7px;overflow:hidden;}
+  .toggle-group button{border:none;background:#fff;padding:7px 13px;font-size:12.5px;font-weight:600;cursor:pointer;color:var(--muted);}
+  .toggle-group button.active{background:var(--accent);color:#fff;}
+  .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11.5px;font-weight:700;}
+  .badge.current{background:var(--good-bg);color:var(--good);}
+  .badge.b7{background:var(--warn-bg);color:var(--warn);}
+  .badge.b14, .badge.b21, .badge.b28{background:var(--bad-bg);color:var(--bad);}
+  .badge.blank{background:#eef0f4;color:var(--muted);}
+  .cell-good{background:var(--good-bg);color:var(--good);font-weight:700;}
+  .cell-bad{background:var(--bad-bg);color:var(--bad);font-weight:700;}
+  .dropzone{border:2px dashed var(--border);border-radius:var(--radius);padding:40px;text-align:center;color:var(--muted);cursor:pointer;background:#fafbfc;}
+  .dropzone.drag{border-color:var(--accent);background:#eef3fe;color:var(--accent);}
+  .modal-overlay{position:fixed;inset:0;background:rgba(20,24,33,.45);display:flex;align-items:center;justify-content:center;z-index:100;}
+  .modal{background:#fff;border-radius:12px;padding:24px;max-width:560px;width:92%;max-height:82vh;overflow-y:auto;}
+  .modal h2{margin-top:0;font-size:16px;}
+  .modal .close{float:right;cursor:pointer;color:var(--muted);font-size:20px;line-height:1;}
+  .timeline{border-left:2px solid var(--border);margin-left:6px;padding-left:16px;}
+  .tl-event{margin-bottom:16px;position:relative;}
+  .tl-event::before{content:'';position:absolute;left:-21px;top:3px;width:9px;height:9px;border-radius:50%;background:var(--accent);}
+  .tl-event .tl-date{font-size:11.5px;color:var(--muted);}
+  .tl-event .tl-type{font-weight:700;font-size:13px;margin:2px 0 4px;}
+  .tl-diff{font-size:12.5px;color:var(--text);}
+  .tl-diff .f{color:var(--muted);}
+  .empty{color:var(--muted);padding:30px;text-align:center;}
+  #progressBox{position:fixed;bottom:20px;right:20px;background:#fff;border:1px solid var(--border);border-radius:10px;padding:14px 18px;box-shadow:0 6px 24px rgba(0,0,0,.12);font-size:13px;max-width:340px;z-index:200;}
+  #progressBox .bar{height:6px;background:#eef0f4;border-radius:4px;margin-top:8px;overflow:hidden;}
+  #progressBox .bar-fill{height:100%;background:var(--accent);width:0%;transition:width .2s;}
+  .hidden{display:none !important;}
+  .pw-row{display:flex;gap:8px;margin-top:10px;}
+  .pw-row input{padding:8px 10px;border:1px solid var(--border);border-radius:7px;}
+  .pw-error{color:var(--bad);font-size:12.5px;margin-top:6px;}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>ETA Report</h1>
+    <div class="sub" id="lastUpdated">Loading…</div>
+  </div>
+  <nav id="mainNav">
+    <button data-view="rollup" class="active">Manager Rollup</button>
+    <button data-view="open">All Open POs</button>
+    <button data-view="blanks">Blanks</button>
+    <button data-view="upload" id="uploadTabBtn" class="hidden">Upload</button>
+  </nav>
+  <button id="adminBtn">🔒 Admin</button>
+</header>
+
+<main id="app"></main>
+
+<div id="modalRoot"></div>
+<div id="progressBox" class="hidden"></div>
+
+<script>
+const SUPABASE_URL = 'https://biqjlwciribdbiqmkxng.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_o9uz8RVhIL1TD7yZX9kb0A_EvtMyasi';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const ADMIN_PW = 'eta2026'; // change this to whatever you like
+
+const BLANK_PAST_BUFFER_DAYS = 5; // mirrors the workbook's $AV$1 = 5
+
+const GOALS = {
+  dollars: { current: 0.90, b7: 0.10, b14: 0.00, b21: 0.00, b28: 0.00, blank: 0.00 },
+  count:   { current: 0.63, b7: 0.10, b14: 0.05, b21: 0.01, b28: 0.01, blank: 0.20 }
+};
+
+const FIELDS_TO_COMPARE = ['store','supplier','product_code','style_name','color_desc','sidemark',
+  'amount_ordered','units','promise_date','order_date','status','ordered_by','taken_by',
+  'style_number','manufacturer','gross_cost','total_cost','reference_number'];
+
+const state = {
+  poLines: [],
+  loadedAt: null,
+  lastBatch: null,
+  isAdmin: false,
+  view: 'rollup',
+  rollupMetric: 'dollars',   // 'dollars' | 'count'
+  rollupGroupBy: 'ordered_by', // 'ordered_by' | 'store'
+  filters: { orderedBy: '', store: '', supplier: '', bucket: '', search: '', activeOnly: true },
+  sort: { col: 'past_days', dir: 'desc' }
+};
+
+// ---------- date / bucket helpers ----------
+function todayLocalMidnight(){ const d = new Date(); d.setHours(0,0,0,0); return d; }
+function parseDateStr(s){ if(!s) return null; const d = new Date(s + 'T00:00:00'); return isNaN(d) ? null : d; }
+function daysBetween(a,b){ return Math.round((a - b) / 86400000); }
+
+function pastDaysOf(row){
+  if(!row.promise_date) return null;
+  const pd = parseDateStr(row.promise_date);
+  if(!pd) return null;
+  return daysBetween(todayLocalMidnight(), pd);
+}
+function bucketOf(row){
+  if(!row.promise_date) return 'blank';
+  const d = pastDaysOf(row);
+  if(d === null) return 'blank';
+  if(d <= 6) return 'current';
+  if(d <= 13) return 'b7';
+  if(d <= 20) return 'b14';
+  if(d <= 27) return 'b21';
+  return 'b28';
+}
+function isBlankPast(row){
+  if(row.promise_date) return false;
+  if(!row.order_date) return false;
+  const od = parseDateStr(row.order_date);
+  if(!od) return false;
+  return daysBetween(todayLocalMidnight(), od) >= BLANK_PAST_BUFFER_DAYS;
+}
+const BUCKET_LABELS = { current:'Current', b7:'7 Days Past', b14:'14 Days Past', b21:'21 Days Past', b28:'28+ Days Past', blank:'Blank' };
+const BUCKET_ORDER = ['current','b7','b14','b21','b28','blank'];
+
+function fmtMoney(n){ if(n===null||n===undefined||isNaN(n)) return '—'; return '$' + Number(n).toLocaleString(undefined,{maximumFractionDigits:0}); }
+function fmtDate(s){ if(!s) return '—'; const d = parseDateStr(s); if(!d) return s; return (d.getMonth()+1)+'/'+d.getDate()+'/'+String(d.getFullYear()).slice(2); }
+function fmtPastDays(row){ const d = pastDaysOf(row); if(d===null) return 'Blank'; if(d<0) return `in ${-d}d`; if(d===0) return 'due today'; return `${d}d past`; }
+
+// ---------- data loading ----------
+async function loadAll(){
+  let all = [];
+  let from = 0;
+  const pageSize = 1000;
+  while(true){
+    const { data, error } = await sb.from('po_lines').select('*').range(from, from + pageSize - 1);
+    if(error) throw error;
+    all = all.concat(data);
+    if(data.length < pageSize) break;
+    from += pageSize;
+  }
+  return all;
+}
+
+async function loadLastBatch(){
+  const { data, error } = await sb.from('report_batches').select('*').order('uploaded_at', { ascending:false }).limit(1);
+  if(error) throw error;
+  return (data && data[0]) || null;
+}
+
+async function refreshData(){
+  document.getElementById('lastUpdated').textContent = 'Loading…';
+  const [lines, batch] = await Promise.all([loadAll(), loadLastBatch()]);
+  state.poLines = lines;
+  state.lastBatch = batch;
+  state.loadedAt = new Date();
+  document.getElementById('lastUpdated').textContent = batch
+    ? `Last upload: ${new Date(batch.uploaded_at).toLocaleString()} · ${batch.row_count} open POs`
+    : 'No data uploaded yet';
+  render();
+}
+
+// ---------- nav ----------
+document.getElementById('mainNav').addEventListener('click', (e)=>{
+  const btn = e.target.closest('button[data-view]');
+  if(!btn) return;
+  state.view = btn.dataset.view;
+  document.querySelectorAll('#mainNav button').forEach(b=>b.classList.toggle('active', b===btn));
+  render();
+});
+
+document.getElementById('adminBtn').addEventListener('click', ()=>{
+  if(state.isAdmin){
+    state.isAdmin = false;
+    document.getElementById('adminBtn').classList.remove('active');
+    document.getElementById('adminBtn').textContent = '🔒 Admin';
+    document.getElementById('uploadTabBtn').classList.add('hidden');
+    if(state.view === 'upload'){ state.view = 'rollup'; document.querySelectorAll('#mainNav button').forEach(b=>b.classList.toggle('active', b.dataset.view==='rollup')); }
+    render();
+    return;
+  }
+  showModal(`
+    <h2>Admin login</h2>
+    <p style="color:var(--muted);font-size:13px;">Needed to upload a new CSV.</p>
+    <div class="pw-row">
+      <input type="password" id="pwInput" placeholder="Password" autofocus>
+      <button class="btn" id="pwSubmit">Unlock</button>
+    </div>
+    <div class="pw-error hidden" id="pwError">Incorrect password.</div>
+  `);
+  document.getElementById('pwSubmit').addEventListener('click', checkPw);
+  document.getElementById('pwInput').addEventListener('keydown', (ev)=>{ if(ev.key==='Enter') checkPw(); });
+});
+
+function checkPw(){
+  const val = document.getElementById('pwInput').value;
+  if(val === ADMIN_PW){
+    state.isAdmin = true;
+    document.getElementById('adminBtn').classList.add('active');
+    document.getElementById('adminBtn').textContent = '🔓 Admin';
+    document.getElementById('uploadTabBtn').classList.remove('hidden');
+    closeModal();
+  } else {
+    document.getElementById('pwError').classList.remove('hidden');
+  }
+}
+
+// ---------- modal ----------
+function showModal(html){
+  document.getElementById('modalRoot').innerHTML = `<div class="modal-overlay" id="modalOverlay"><div class="modal">${html}</div></div>`;
+  document.getElementById('modalOverlay').addEventListener('click', (e)=>{ if(e.target.id==='modalOverlay') closeModal(); });
+}
+function closeModal(){ document.getElementById('modalRoot').innerHTML = ''; }
+
+// ---------- render dispatch ----------
+function render(){
+  const app = document.getElementById('app');
+  if(state.view === 'rollup') app.innerHTML = renderRollup();
+  else if(state.view === 'open') app.innerHTML = renderOpenTable();
+  else if(state.view === 'blanks') app.innerHTML = renderBlanks();
+  else if(state.view === 'upload') app.innerHTML = renderUpload();
+  attachViewHandlers();
+}
+
+// ============================================================
+// MANAGER ROLLUP
+// ============================================================
+function renderRollup(){
+  const active = state.poLines.filter(r=>r.is_active);
+  const groupField = state.rollupGroupBy === 'store' ? 'store' : 'ordered_by';
+  const groups = new Map();
+  for(const row of active){
+    const key = groupField==='store' ? (row.store ?? '—') : (row.ordered_by || '—');
+    if(!groups.has(key)) groups.set(key, { current:0, b7:0, b14:0, b21:0, b28:0, blank:0 });
+    const g = groups.get(key);
+    const bucket = bucketOf(row);
+    const val = state.rollupMetric === 'dollars' ? (Number(row.total_cost)||0) : 1;
+    g[bucket] += val;
+  }
+  const totals = { current:0, b7:0, b14:0, b21:0, b28:0, blank:0 };
+  active.forEach(row=>{
+    const bucket = bucketOf(row);
+    totals[bucket] += state.rollupMetric === 'dollars' ? (Number(row.total_cost)||0) : 1;
+  });
+
+  const goals = GOALS[state.rollupMetric];
+  const rows = Array.from(groups.entries()).sort((a,b)=> String(a[0]).localeCompare(String(b[0]), undefined, {numeric:true}));
+
+  function pctCell(bucketKey, value, rowTotal){
+    const pct = rowTotal ? value/rowTotal : 0;
+    const goal = goals[bucketKey];
+    let cls = '';
+    if(bucketKey === 'current'){ cls = pct >= goal ? 'cell-good' : 'cell-bad'; }
+    else { cls = pct <= goal ? 'cell-good' : 'cell-bad'; }
+    const display = state.rollupMetric === 'dollars' ? fmtMoney(value) : value;
+    return `<td class="${cls}">${(pct*100).toFixed(0)}% <span style="font-weight:400;opacity:.65">(${display})</span></td>`;
+  }
+
+  const totalAll = Object.values(totals).reduce((a,b)=>a+b,0);
+
+  return `
+    <div class="stat-row">
+      <div class="stat"><div class="num">${active.length.toLocaleString()}</div><div class="label">Open POs</div></div>
+      <div class="stat"><div class="num">${fmtMoney(active.reduce((s,r)=>s+(Number(r.total_cost)||0),0))}</div><div class="label">Total $ Open</div></div>
+    </div>
+    <div class="panel">
+      <div class="toolbar">
+        <span style="font-weight:700;">Metric:</span>
+        <div class="toggle-group" id="metricToggle">
+          <button data-metric="dollars" class="${state.rollupMetric==='dollars'?'active':''}">Dollars</button>
+          <button data-metric="count" class="${state.rollupMetric==='count'?'active':''}">Count</button>
+        </div>
+        <span style="font-weight:700;margin-left:16px;">Group by:</span>
+        <div class="toggle-group" id="groupToggle">
+          <button data-group="ordered_by" class="${state.rollupGroupBy==='ordered_by'?'active':''}">Ordered By</button>
+          <button data-group="store" class="${state.rollupGroupBy==='store'?'active':''}">Store</button>
+        </div>
+      </div>
+      <table>
+        <thead><tr>
+          <th>${state.rollupGroupBy==='store'?'Store':'Ordered By'}</th>
+          <th>Current</th><th>7 Days Past</th><th>14 Days Past</th><th>21 Days Past</th><th>28+ Days Past</th><th>Blank</th>
+        </tr></thead>
+        <tbody>
+          <tr style="font-weight:700;background:#fafbfc;">
+            <td>Total</td>
+            ${BUCKET_ORDER.map(b=>pctCell(b, totals[b], totalAll)).join('')}
+          </tr>
+          ${rows.map(([key, g])=>{
+            const rowTotal = Object.values(g).reduce((a,b)=>a+b,0);
+            return `<tr><td>${key}</td>${BUCKET_ORDER.map(b=>pctCell(b, g[b], rowTotal)).join('')}</tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      <p style="color:var(--muted);font-size:12px;margin-top:12px;">
+        Goals (${state.rollupMetric}): Current ≥ ${(goals.current*100).toFixed(0)}%,
+        7d ≤ ${(goals.b7*100).toFixed(0)}%, 14d ≤ ${(goals.b14*100).toFixed(0)}%,
+        21d ≤ ${(goals.b21*100).toFixed(0)}%, 28+ ≤ ${(goals.b28*100).toFixed(0)}%, Blank ≤ ${(goals.blank*100).toFixed(0)}%
+      </p>
+    </div>
+  `;
+}
+
+// ============================================================
+// ALL OPEN POs (master table)
+// ============================================================
+function renderOpenTable(){
+  let rows = state.poLines.slice();
+  if(state.filters.activeOnly) rows = rows.filter(r=>r.is_active);
+  if(state.filters.orderedBy) rows = rows.filter(r=>r.ordered_by === state.filters.orderedBy);
+  if(state.filters.store) rows = rows.filter(r=>String(r.store) === state.filters.store);
+  if(state.filters.bucket) rows = rows.filter(r=>bucketOf(r) === state.filters.bucket);
+  if(state.filters.supplier) rows = rows.filter(r=>(r.supplier||'').toLowerCase().includes(state.filters.supplier.toLowerCase()));
+  if(state.filters.search){
+    const s = state.filters.search.toLowerCase();
+    rows = rows.filter(r=> (r.po_number||'').toLowerCase().includes(s) || (r.style_name||'').toLowerCase().includes(s) || (r.sidemark||'').toLowerCase().includes(s) || (r.reference_number||'').toLowerCase().includes(s));
+  }
+
+  const { col, dir } = state.sort;
+  rows.sort((a,b)=>{
+    let av, bv;
+    if(col === 'past_days'){ av = pastDaysOf(a); bv = pastDaysOf(b); av = av===null? -9999 : av; bv = bv===null? -9999 : bv; }
+    else { av = a[col]; bv = b[col]; }
+    if(av === null || av === undefined) av = '';
+    if(bv === null || bv === undefined) bv = '';
+    if(av < bv) return dir==='asc' ? -1 : 1;
+    if(av > bv) return dir==='asc' ? 1 : -1;
+    return 0;
+  });
+
+  const orderedByOptions = Array.from(new Set(state.poLines.map(r=>r.ordered_by).filter(Boolean))).sort();
+  const storeOptions = Array.from(new Set(state.poLines.map(r=>r.store).filter(v=>v!==null && v!==undefined))).sort((a,b)=>a-b);
+
+  const CAP = 500;
+  const shown = rows.slice(0, CAP);
+
+  return `
+    <div class="panel">
+      <div class="toolbar">
+        <select id="f-orderedBy"><option value="">All Ordered By</option>${orderedByOptions.map(o=>`<option value="${o}" ${state.filters.orderedBy===o?'selected':''}>${o}</option>`).join('')}</select>
+        <select id="f-store"><option value="">All Stores</option>${storeOptions.map(o=>`<option value="${o}" ${state.filters.store===String(o)?'selected':''}>Store ${o}</option>`).join('')}</select>
+        <select id="f-bucket"><option value="">All Buckets</option>${BUCKET_ORDER.map(b=>`<option value="${b}" ${state.filters.bucket===b?'selected':''}>${BUCKET_LABELS[b]}</option>`).join('')}</select>
+        <input type="text" id="f-supplier" placeholder="Supplier…" value="${state.filters.supplier}">
+        <input type="text" id="f-search" placeholder="Search PO / style / sidemark / ref#…" value="${state.filters.search}" style="min-width:220px;">
+        <label><input type="checkbox" id="f-activeOnly" ${state.filters.activeOnly?'checked':''}> Active only</label>
+        <button class="btn secondary" id="exportBtn">Export CSV</button>
+        <span style="margin-left:auto;color:var(--muted);font-size:12.5px;">${rows.length.toLocaleString()} PO${rows.length===1?'':'s'}${rows.length>CAP?` (showing first ${CAP})`:''}</span>
+      </div>
+      <table>
+        <thead><tr>
+          <th data-col="store">Store</th>
+          <th data-col="supplier">Supplier</th>
+          <th data-col="po_number">PO Number</th>
+          <th data-col="style_name">Style / Color</th>
+          <th data-col="ordered_by">Ordered By</th>
+          <th data-col="order_date">Order Date</th>
+          <th data-col="promise_date">Promise Date</th>
+          <th data-col="past_days">Status</th>
+          <th data-col="total_cost">Total Cost</th>
+          <th data-col="reference_number">Reference #</th>
+        </tr></thead>
+        <tbody>
+          ${shown.length ? shown.map(r=>`
+            <tr class="po-row" data-po="${r.po_number}">
+              <td>${r.store ?? '—'}</td>
+              <td>${r.supplier || '—'}</td>
+              <td>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''}</td>
+              <td>${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
+              <td>${r.ordered_by || '—'}</td>
+              <td>${fmtDate(r.order_date)}</td>
+              <td>${fmtDate(r.promise_date)}</td>
+              <td><span class="badge ${bucketOf(r)}">${fmtPastDays(r)}</span></td>
+              <td>${fmtMoney(r.total_cost)}</td>
+              <td>${r.reference_number || ''}</td>
+            </tr>
+          `).join('') : `<tr><td colspan="10" class="empty">No POs match these filters.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ============================================================
+// BLANKS
+// ============================================================
+function renderBlanks(){
+  const rows = state.poLines.filter(r=>r.is_active && !r.promise_date).sort((a,b)=> new Date(a.order_date||0) - new Date(b.order_date||0));
+  return `
+    <div class="panel">
+      <p style="color:var(--muted);font-size:13px;margin-top:0;">Open POs with no Promise Date. Flagged if it's been ${BLANK_PAST_BUFFER_DAYS}+ days since the Order Date.</p>
+      <table>
+        <thead><tr><th>Store</th><th>Supplier</th><th>PO Number</th><th>Style / Color</th><th>Ordered By</th><th>Order Date</th><th>Reference #</th><th>Flag</th></tr></thead>
+        <tbody>
+          ${rows.length ? rows.map(r=>`
+            <tr class="po-row" data-po="${r.po_number}">
+              <td>${r.store ?? '—'}</td>
+              <td>${r.supplier || '—'}</td>
+              <td>${r.po_number}</td>
+              <td>${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
+              <td>${r.ordered_by || '—'}</td>
+              <td>${fmtDate(r.order_date)}</td>
+              <td>${r.reference_number || ''}</td>
+              <td>${isBlankPast(r) ? '<span class="badge b28">past buffer</span>' : ''}</td>
+            </tr>
+          `).join('') : `<tr><td colspan="8" class="empty">No blank-promise-date POs.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ============================================================
+// UPLOAD
+// ============================================================
+function renderUpload(){
+  if(!state.isAdmin) return `<div class="panel"><p class="empty">Admin login required.</p></div>`;
+  return `
+    <div class="panel">
+      <h2 style="margin-top:0;">Upload eta_TBD.CSV</h2>
+      <p style="color:var(--muted);font-size:13px;">Drop the raw export below. The app filters to <code>Status = Open</code> automatically — no need to pre-clean it.</p>
+      <div class="dropzone" id="dropzone">
+        <input type="file" id="fileInput" accept=".csv" class="hidden">
+        Drag & drop eta_TBD.CSV here, or click to choose a file
+      </div>
+    </div>
+  `;
+}
+
+function attachUploadHandlers(){
+  const dz = document.getElementById('dropzone');
+  if(!dz) return;
+  const fileInput = document.getElementById('fileInput');
+  dz.addEventListener('click', ()=>fileInput.click());
+  fileInput.addEventListener('change', (e)=>{ if(e.target.files[0]) handleFile(e.target.files[0]); });
+  ['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev, (e)=>{ e.preventDefault(); dz.classList.add('drag'); }));
+  ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev, (e)=>{ e.preventDefault(); dz.classList.remove('drag'); }));
+  dz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f) handleFile(f); });
+}
+
+function showProgress(text, pct){
+  const box = document.getElementById('progressBox');
+  box.classList.remove('hidden');
+  box.innerHTML = `<div>${text}</div>` + (pct!==undefined ? `<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>` : '');
+}
+function hideProgress(){ document.getElementById('progressBox').classList.add('hidden'); }
+
+function parseDateYYYYMMDD(v){
+  if(v === undefined || v === null) return null;
+  const s = String(v).trim();
+  if(!/^\d{8}$/.test(s)) return null;
+  const y = s.slice(0,4), m = s.slice(4,6), d = s.slice(6,8);
+  return `${y}-${m}-${d}`;
+}
+function numOr(v, fallback){
+  const n = parseFloat(v);
+  return isNaN(n) ? fallback : n;
+}
+
+function mapCsvRow(r){
+  const po_number = (r['PO Number']||'').trim();
+  if(!po_number) return null;
+  const storeRaw = (r['Store']||'').toString().trim();
+  const store = storeRaw === '' ? null : parseInt(storeRaw, 10);
+  const gross_cost = numOr(r['Gross Cost'], 0);
+  const amount_ordered = numOr(r['Amount Ordered'], 0);
+  return {
+    po_number,
+    store: isNaN(store) ? null : store,
+    supplier: (r['Supplier']||'').trim() || null,
+    product_code: (r['Product Code']||'').trim() || null,
+    style_name: (r['Style / Name']||'').trim() || null,
+    color_desc: (r['Color / Desc']||'').trim() || null,
+    sidemark: (r['Sidemark']||'').trim() || null,
+    amount_ordered,
+    units: (r['Units']||'').trim() || null,
+    promise_date: parseDateYYYYMMDD(r['Promise Date']),
+    order_date: parseDateYYYYMMDD(r['Order Date']),
+    status: (r['Status']||'').trim() || null,
+    ordered_by: (r['Ordered By']||'').trim() || null,
+    taken_by: (r['Taken By']||'').trim() || null,
+    style_number: (r['Style Number']||'').trim() || null,
+    manufacturer: (r['Manufacturer']||'').trim() || null,
+    gross_cost,
+    total_cost: Math.round(gross_cost * amount_ordered * 100) / 100,
+    reference_number: (r['Reference #']||'').trim() || null
+  };
+}
+
+function valuesEqual(a, b){
+  const an = (a===undefined||a===null||a==='') ? null : a;
+  const bn = (b===undefined||b===null||b==='') ? null : b;
+  if(typeof an === 'number' || typeof bn === 'number'){
+    const af = Number(an), bf = Number(bn);
+    if(isNaN(af) && isNaN(bf)) return true;
+    if(isNaN(af) || isNaN(bf)) return false;
+    return Math.abs(af - bf) < 0.005;
+  }
+  return String(an ?? '') === String(bn ?? '');
+}
+
+async function upsertChunked(rows, chunkSize){
+  for(let i=0; i<rows.length; i+=chunkSize){
+    const chunk = rows.slice(i, i+chunkSize);
+    const { error } = await sb.from('po_lines').upsert(chunk, { onConflict: 'po_number' });
+    if(error) throw error;
+    showProgress(`Saving PO lines… ${Math.min(i+chunkSize, rows.length).toLocaleString()} / ${rows.length.toLocaleString()}`, 40 + (i/rows.length)*40);
+  }
+}
+async function insertChunked(table, rows, chunkSize){
+  for(let i=0; i<rows.length; i+=chunkSize){
+    const chunk = rows.slice(i, i+chunkSize);
+    if(!chunk.length) continue;
+    const { error } = await sb.from(table).insert(chunk);
+    if(error) throw error;
+  }
+}
+
+async function handleFile(file){
+  showProgress('Parsing CSV…', 5);
+  const openRows = [];
+  Papa.parse(file, {
+    header: true,
+    skipEmptyLines: true,
+    worker: true,
+    step: (results)=>{
+      const r = results.data;
+      if((r['Status']||'').trim().toLowerCase() === 'open'){
+        const mapped = mapCsvRow(r);
+        if(mapped) openRows.push(mapped);
+      }
+    },
+    complete: ()=>{ processUpload(openRows, file.name).catch(err=>{
+      console.error(err);
+      showProgress('Error: ' + err.message);
+      setTimeout(hideProgress, 4000);
+    }); },
+    error: (err)=>{ showProgress('Parse error: ' + err.message); setTimeout(hideProgress, 4000); }
+  });
+}
+
+async function processUpload(openRowsRaw, filename){
+  showProgress(`Parsed ${openRowsRaw.length.toLocaleString()} open rows. Deduplicating…`, 15);
+  const byPo = new Map();
+  openRowsRaw.forEach(r=>byPo.set(r.po_number, r)); // last one wins if dup within file
+  const uploadRows = Array.from(byPo.values());
+
+  showProgress('Creating batch record…', 20);
+  const { data: batchRow, error: batchErr } = await sb.from('report_batches')
+    .insert({ source_filename: filename, row_count: uploadRows.length }).select().single();
+  if(batchErr) throw batchErr;
+  const batchId = batchRow.id;
+
+  showProgress('Loading current state…', 25);
+  const existing = await loadAll();
+  const existingByPo = new Map(existing.map(r=>[r.po_number, r]));
+  const seenPoSet = new Set(uploadRows.map(r=>r.po_number));
+  const nowIso = new Date().toISOString();
+
+  const upserts = [];
+  const historyEvents = [];
+
+  for(const row of uploadRows){
+    const prev = existingByPo.get(row.po_number);
+    if(!prev){
+      upserts.push({ ...row, first_seen_batch_id: batchId, first_seen_at: nowIso, last_seen_batch_id: batchId, last_seen_at: nowIso, is_active: true });
+      historyEvents.push({ po_number: row.po_number, batch_id: batchId, event_type: 'created', changes: null, detected_at: nowIso });
+    } else {
+      const changes = [];
+      FIELDS_TO_COMPARE.forEach(f=>{
+        if(!valuesEqual(prev[f], row[f])) changes.push({ field: f, old: prev[f] ?? null, new: row[f] ?? null });
+      });
+      const wasInactive = prev.is_active === false;
+      upserts.push({ ...row, first_seen_batch_id: prev.first_seen_batch_id, first_seen_at: prev.first_seen_at, last_seen_batch_id: batchId, last_seen_at: nowIso, is_active: true });
+      if(changes.length){
+        historyEvents.push({ po_number: row.po_number, batch_id: batchId, event_type: wasInactive ? 'reappeared' : 'updated', changes, detected_at: nowIso });
+      } else if(wasInactive){
+        historyEvents.push({ po_number: row.po_number, batch_id: batchId, event_type: 'reappeared', changes: null, detected_at: nowIso });
+      }
+    }
+  }
+
+  const closedUpdates = [];
+  for(const prev of existing){
+    if(prev.is_active && !seenPoSet.has(prev.po_number)){
+      closedUpdates.push({ po_number: prev.po_number, is_active: false });
+      historyEvents.push({ po_number: prev.po_number, batch_id: batchId, event_type: 'closed', changes: null, detected_at: nowIso });
+    }
+  }
+
+  showProgress(`Saving ${upserts.length.toLocaleString()} PO lines…`, 40);
+  await upsertChunked(upserts, 500);
+  if(closedUpdates.length){
+    showProgress(`Marking ${closedUpdates.length.toLocaleString()} POs closed…`, 82);
+    await upsertChunked(closedUpdates, 500);
+  }
+  showProgress(`Writing ${historyEvents.length.toLocaleString()} history events…`, 90);
+  await insertChunked('po_line_history', historyEvents, 500);
+
+  showProgress('Done. Refreshing…', 100);
+  await refreshData();
+  setTimeout(hideProgress, 1500);
+}
+
+// ============================================================
+// PO history modal
+// ============================================================
+async function openHistoryModal(poNumber){
+  const row = state.poLines.find(r=>r.po_number === poNumber);
+  showModal(`<span class="close" id="modalClose">&times;</span><h2>${poNumber}</h2><p class="empty">Loading history…</p>`);
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+
+  const { data: history, error } = await sb.from('po_line_history').select('*').eq('po_number', poNumber).order('detected_at', { ascending: true });
+  if(error){ showModal(`<span class="close" id="modalClose">&times;</span><h2>${poNumber}</h2><p class="empty">Error loading history.</p>`); document.getElementById('modalClose').addEventListener('click', closeModal); return; }
+
+  const header = row ? `
+    <div style="font-size:13px;color:var(--muted);margin-bottom:14px;">
+      ${row.supplier || ''} · ${row.style_name || ''} ${row.color_desc ? ('· '+row.color_desc) : ''}<br>
+      Store ${row.store ?? '—'} · Ordered by ${row.ordered_by || '—'} · Promise ${fmtDate(row.promise_date)} · ${row.is_active===false ? '<span class="badge blank">closed</span>' : `<span class="badge ${bucketOf(row)}">${fmtPastDays(row)}</span>`}
+    </div>` : '';
+
+  const events = history.map(ev=>{
+    let body = '';
+    if(ev.event_type === 'created'){ body = 'First appeared on an upload.'; }
+    else if(ev.event_type === 'closed'){ body = 'No longer on the Open export (shipped / satisfied / canceled elsewhere).'; }
+    else if(ev.event_type === 'reappeared'){ body = 'Back on the Open export after being closed.'; }
+    else if(ev.event_type === 'updated'){
+      body = (ev.changes||[]).map(c=>`<div class="tl-diff"><span class="f">${c.field}:</span> ${c.old ?? '—'} → <strong>${c.new ?? '—'}</strong></div>`).join('');
+    }
+    return `<div class="tl-event">
+      <div class="tl-date">${new Date(ev.detected_at).toLocaleString()}</div>
+      <div class="tl-type">${ev.event_type}</div>
+      ${body}
+    </div>`;
+  }).join('') || '<p class="empty">No history yet.</p>';
+
+  showModal(`<span class="close" id="modalClose">&times;</span><h2>${poNumber}</h2>${header}<div class="timeline">${events}</div>`);
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+}
+
+// ============================================================
+// view-level event wiring
+// ============================================================
+function attachViewHandlers(){
+  if(state.view === 'upload'){ attachUploadHandlers(); return; }
+
+  document.querySelectorAll('tr.po-row').forEach(tr=>{
+    tr.addEventListener('click', ()=>openHistoryModal(tr.dataset.po));
+  });
+
+  if(state.view === 'rollup'){
+    document.getElementById('metricToggle')?.addEventListener('click', (e)=>{
+      const b = e.target.closest('button[data-metric]'); if(!b) return;
+      state.rollupMetric = b.dataset.metric; render();
+    });
+    document.getElementById('groupToggle')?.addEventListener('click', (e)=>{
+      const b = e.target.closest('button[data-group]'); if(!b) return;
+      state.rollupGroupBy = b.dataset.group; render();
+    });
+  }
+
+  if(state.view === 'open'){
+    document.getElementById('f-orderedBy')?.addEventListener('change', (e)=>{ state.filters.orderedBy = e.target.value; render(); });
+    document.getElementById('f-store')?.addEventListener('change', (e)=>{ state.filters.store = e.target.value; render(); });
+    document.getElementById('f-bucket')?.addEventListener('change', (e)=>{ state.filters.bucket = e.target.value; render(); });
+    document.getElementById('f-supplier')?.addEventListener('input', (e)=>{ state.filters.supplier = e.target.value; render(); });
+    document.getElementById('f-search')?.addEventListener('input', (e)=>{ state.filters.search = e.target.value; render(); });
+    document.getElementById('f-activeOnly')?.addEventListener('change', (e)=>{ state.filters.activeOnly = e.target.checked; render(); });
+    document.getElementById('exportBtn')?.addEventListener('click', exportCsv);
+    document.querySelectorAll('th[data-col]').forEach(th=>{
+      th.addEventListener('click', ()=>{
+        const col = th.dataset.col;
+        if(state.sort.col === col) state.sort.dir = state.sort.dir==='asc' ? 'desc' : 'asc';
+        else { state.sort.col = col; state.sort.dir = 'asc'; }
+        render();
+      });
+    });
+  }
+}
+
+function exportCsv(){
+  let rows = state.poLines.slice();
+  if(state.filters.activeOnly) rows = rows.filter(r=>r.is_active);
+  if(state.filters.orderedBy) rows = rows.filter(r=>r.ordered_by === state.filters.orderedBy);
+  if(state.filters.store) rows = rows.filter(r=>String(r.store) === state.filters.store);
+  if(state.filters.bucket) rows = rows.filter(r=>bucketOf(r) === state.filters.bucket);
+  const csv = Papa.unparse(rows.map(r=>({
+    Store: r.store, Supplier: r.supplier, 'PO Number': r.po_number, Style: r.style_name, Color: r.color_desc,
+    'Ordered By': r.ordered_by, 'Order Date': r.order_date, 'Promise Date': r.promise_date,
+    'Past Days': pastDaysOf(r), Bucket: BUCKET_LABELS[bucketOf(r)], 'Total Cost': r.total_cost, 'Reference #': r.reference_number
+  })));
+  const blob = new Blob([csv], { type:'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'eta-report-export.csv'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ---------- init ----------
+refreshData().catch(err=>{
+  console.error(err);
+  document.getElementById('app').innerHTML = `<div class="panel"><p class="empty">Failed to load data: ${err.message}</p></div>`;
+});
+</script>
+</body>
+</html>
