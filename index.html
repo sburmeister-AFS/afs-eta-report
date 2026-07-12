@@ -41,6 +41,14 @@
   .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;}
   .toolbar select, .toolbar input[type=text]{padding:7px 10px;border:1px solid var(--border);border-radius:7px;font-size:13px;background:#fff;}
   .toolbar label{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px;}
+  .filter-row{margin-bottom:14px;}
+  .filter-row-label{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700;margin-bottom:7px;}
+  .filter-cards{display:flex;flex-wrap:wrap;gap:7px;}
+  .filter-card{border:1px solid var(--border);background:#fff;border-radius:9px;padding:7px 12px;font-size:12.5px;font-weight:600;color:var(--text);cursor:pointer;display:inline-flex;align-items:center;gap:7px;}
+  .filter-card:hover{border-color:var(--accent);}
+  .filter-card.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+  .filter-card .count{font-weight:600;font-size:11px;opacity:.65;background:rgba(0,0,0,.06);border-radius:9px;padding:1px 7px;}
+  .filter-card.active .count{opacity:1;background:rgba(255,255,255,.25);}
   .btn{background:var(--accent);color:#fff;border:none;padding:8px 14px;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;}
   .btn:hover{background:var(--accent-dark);}
   .btn.secondary{background:#fff;color:var(--text);border:1px solid var(--border);}
@@ -402,19 +410,84 @@ function renderRollup(){
 }
 
 // ============================================================
+// filtering helpers (shared by the table, the filter cards, and CSV export)
+// ============================================================
+// Normalizes "EMILY.FOX" / "Emily Fox" / "emily fox" to the same key so near-duplicate
+// spellings of the same person aggregate into one filter card instead of three.
+function nameKey(name){ return (name||'').toUpperCase().replace(/[^A-Z0-9]/g,''); }
+
+function matchesFilters(r, filters, excludeDim){
+  if(filters.activeOnly && !r.is_active) return false;
+  if(excludeDim!=='orderedBy' && filters.orderedBy && nameKey(r.ordered_by) !== filters.orderedBy) return false;
+  if(excludeDim!=='store' && filters.store && String(r.store) !== filters.store) return false;
+  if(excludeDim!=='bucket' && filters.bucket && bucketOf(r) !== filters.bucket) return false;
+  if(filters.supplier && !(r.supplier||'').toLowerCase().includes(filters.supplier.toLowerCase())) return false;
+  if(filters.search){
+    const s = filters.search.toLowerCase();
+    const hit = (r.po_number||'').toLowerCase().includes(s) || (r.style_name||'').toLowerCase().includes(s) || (r.sidemark||'').toLowerCase().includes(s) || (r.reference_number||'').toLowerCase().includes(s);
+    if(!hit) return false;
+  }
+  return true;
+}
+function filterRows(filters){ return state.poLines.filter(r=>matchesFilters(r, filters, null)); }
+
+// counts per option for one filter dimension, honoring every OTHER active filter (facet counts)
+function facetCounts(dim){
+  const counts = new Map();
+  state.poLines.forEach(r=>{
+    if(!matchesFilters(r, state.filters, dim)) return;
+    let key;
+    if(dim === 'orderedBy') key = r.ordered_by ? nameKey(r.ordered_by) : null;
+    else if(dim === 'store') key = (r.store===null||r.store===undefined) ? null : String(r.store);
+    else key = bucketOf(r);
+    if(key === null) return;
+    counts.set(key, (counts.get(key)||0) + 1);
+  });
+  return counts;
+}
+
+// picks one canonical display label per normalized Ordered By key (most frequent, longest as tiebreak)
+function orderedByCanonicalLabels(){
+  const groups = new Map();
+  state.poLines.forEach(r=>{
+    if(!r.ordered_by) return;
+    const key = nameKey(r.ordered_by);
+    if(!groups.has(key)) groups.set(key, new Map());
+    const m = groups.get(key);
+    m.set(r.ordered_by, (m.get(r.ordered_by)||0) + 1);
+  });
+  const labels = new Map();
+  for(const [key, variants] of groups){
+    let best = null, bestScore = -1;
+    for(const [label, count] of variants){
+      const score = count*1000 + label.length;
+      if(score > bestScore){ bestScore = score; best = label; }
+    }
+    labels.set(key, best);
+  }
+  return labels;
+}
+
+function renderFilterCardRow(labelText, dim, options){
+  const counts = facetCounts(dim);
+  const totalCount = state.poLines.filter(r=>matchesFilters(r, state.filters, dim)).length;
+  const activeVal = state.filters[dim];
+  return `
+    <div class="filter-row">
+      <div class="filter-row-label">${labelText}</div>
+      <div class="filter-cards">
+        <button type="button" class="filter-card ${!activeVal?'active':''}" data-dim="${dim}" data-value="">All <span class="count">${totalCount}</span></button>
+        ${options.map(o=>`<button type="button" class="filter-card ${activeVal===o.value?'active':''}" data-dim="${dim}" data-value="${o.value}">${o.label} <span class="count">${counts.get(o.value)||0}</span></button>`).join('')}
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
 // ALL OPEN POs (master table)
 // ============================================================
 function renderOpenTable(){
-  let rows = state.poLines.slice();
-  if(state.filters.activeOnly) rows = rows.filter(r=>r.is_active);
-  if(state.filters.orderedBy) rows = rows.filter(r=>r.ordered_by === state.filters.orderedBy);
-  if(state.filters.store) rows = rows.filter(r=>String(r.store) === state.filters.store);
-  if(state.filters.bucket) rows = rows.filter(r=>bucketOf(r) === state.filters.bucket);
-  if(state.filters.supplier) rows = rows.filter(r=>(r.supplier||'').toLowerCase().includes(state.filters.supplier.toLowerCase()));
-  if(state.filters.search){
-    const s = state.filters.search.toLowerCase();
-    rows = rows.filter(r=> (r.po_number||'').toLowerCase().includes(s) || (r.style_name||'').toLowerCase().includes(s) || (r.sidemark||'').toLowerCase().includes(s) || (r.reference_number||'').toLowerCase().includes(s));
-  }
+  let rows = filterRows(state.filters);
 
   const { col, dir } = state.sort;
   rows.sort((a,b)=>{
@@ -428,18 +501,23 @@ function renderOpenTable(){
     return 0;
   });
 
-  const orderedByOptions = Array.from(new Set(state.poLines.map(r=>r.ordered_by).filter(Boolean))).sort();
-  const storeOptions = Array.from(new Set(state.poLines.map(r=>r.store).filter(v=>v!==null && v!==undefined))).sort((a,b)=>a-b);
+  const orderedByOptions = Array.from(orderedByCanonicalLabels().entries())
+    .map(([value,label])=>({ value, label }))
+    .sort((a,b)=>a.label.localeCompare(b.label));
+  const storeOptions = Array.from(new Set(state.poLines.map(r=>r.store).filter(v=>v!==null && v!==undefined)))
+    .sort((a,b)=>a-b)
+    .map(v=>({ value: String(v), label: `Store ${v}` }));
+  const bucketOptions = BUCKET_ORDER.map(b=>({ value: b, label: BUCKET_LABELS[b] }));
 
   const CAP = 500;
   const shown = rows.slice(0, CAP);
 
   return `
     <div class="panel">
+      ${renderFilterCardRow('Ordered By', 'orderedBy', orderedByOptions)}
+      ${renderFilterCardRow('Store', 'store', storeOptions)}
+      ${renderFilterCardRow('Bucket', 'bucket', bucketOptions)}
       <div class="toolbar">
-        <select id="f-orderedBy"><option value="">All Ordered By</option>${orderedByOptions.map(o=>`<option value="${o}" ${state.filters.orderedBy===o?'selected':''}>${o}</option>`).join('')}</select>
-        <select id="f-store"><option value="">All Stores</option>${storeOptions.map(o=>`<option value="${o}" ${state.filters.store===String(o)?'selected':''}>Store ${o}</option>`).join('')}</select>
-        <select id="f-bucket"><option value="">All Buckets</option>${BUCKET_ORDER.map(b=>`<option value="${b}" ${state.filters.bucket===b?'selected':''}>${BUCKET_LABELS[b]}</option>`).join('')}</select>
         <input type="text" id="f-supplier" placeholder="Supplier…" value="${state.filters.supplier}">
         <input type="text" id="f-search" placeholder="Search PO / style / sidemark / ref#…" value="${state.filters.search}" style="min-width:220px;">
         <label><input type="checkbox" id="f-activeOnly" ${state.filters.activeOnly?'checked':''}> Active only</label>
@@ -759,9 +837,12 @@ function attachViewHandlers(){
   }
 
   if(state.view === 'open'){
-    document.getElementById('f-orderedBy')?.addEventListener('change', (e)=>{ state.filters.orderedBy = e.target.value; render(); });
-    document.getElementById('f-store')?.addEventListener('change', (e)=>{ state.filters.store = e.target.value; render(); });
-    document.getElementById('f-bucket')?.addEventListener('change', (e)=>{ state.filters.bucket = e.target.value; render(); });
+    document.querySelectorAll('.filter-card').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        state.filters[btn.dataset.dim] = btn.dataset.value;
+        render();
+      });
+    });
     document.getElementById('f-supplier')?.addEventListener('input', (e)=>{ state.filters.supplier = e.target.value; render(); });
     document.getElementById('f-search')?.addEventListener('input', (e)=>{ state.filters.search = e.target.value; render(); });
     document.getElementById('f-activeOnly')?.addEventListener('change', (e)=>{ state.filters.activeOnly = e.target.checked; render(); });
@@ -778,11 +859,7 @@ function attachViewHandlers(){
 }
 
 function exportCsv(){
-  let rows = state.poLines.slice();
-  if(state.filters.activeOnly) rows = rows.filter(r=>r.is_active);
-  if(state.filters.orderedBy) rows = rows.filter(r=>r.ordered_by === state.filters.orderedBy);
-  if(state.filters.store) rows = rows.filter(r=>String(r.store) === state.filters.store);
-  if(state.filters.bucket) rows = rows.filter(r=>bucketOf(r) === state.filters.bucket);
+  const rows = filterRows(state.filters);
   const csv = Papa.unparse(rows.map(r=>({
     Store: r.store, Supplier: r.supplier, 'PO Number': r.po_number, Style: r.style_name, Color: r.color_desc,
     'Ordered By': r.ordered_by, 'Order Date': r.order_date, 'Promise Date': r.promise_date,
