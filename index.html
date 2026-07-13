@@ -147,6 +147,40 @@ const FIELDS_TO_COMPARE = ['store','supplier','product_code','style_name','color
   'amount_ordered','units','promise_date','order_date','status','ordered_by','taken_by',
   'style_number','manufacturer','gross_cost','total_cost','reference_number'];
 
+// From AFS's Product Codes report (Purchasing Manager > Product Codes.pdf). Codes not
+// listed here are "** UNDEFINED **" in that report and just display as their raw number.
+const PRODUCT_CODES = {
+  '01':'CARPET', '02':'VINYL', '03':'PAD', '04':'CARPET TILE', '05':'VCT',
+  '06':'LVP, LVT, WPC & SPC', '07':'LAMINATE FLOOR', '08':'CORK FLOOR', '09':'NATURAL STONE',
+  '10':'WOOD - PREFINISHED', '11':'WOOD - UNFINISHED', '12':'FOS MATERIALS',
+  '13':'RUBBER & SPORTS FLR', '14':'CONCRETE COATINGS', '15':'UNDERLAYMENT - ROLL',
+  '16':'UNDERLAYMENT - BOARD', '17':'UNDERLAY PREP MATERL', '18':'ADHESIVES & SEAM SLR',
+  '19':'GROUT & THINSET', '20':'CAULK & SILICONE', '21':'SEATS & SILLS', '22':'TILE & BULLNOSE',
+  '23':'TILE SUPPLIES & COMP', '24':'TILE 3RD PARTY TRIMS', '25':'TRANSITIONS & METALS',
+  '26':'COVE BASE & WALLBASE', '27':'QUARTER ROUND & BB', '28':'VENTS',
+  '29':'STAIR TREADS & PARTS', '30':'COVER & PROTECTION', '31':'SUNDRIES & INST SUPP',
+  '32':'CLEANERS & POLISH', '33':'TOOLS', '34':'AREA RUGS', '35':'WORKROOM SUPPLIES',
+  '36':'REMNANTS - CARPET', '37':'WALL COVERINGS', '38':'MISC MATERIALS',
+  '39':'WINDOW TREATMENTS', '40':'COUNTERTOPS', '41':'SAMPLES', '42':'RUNNERS',
+  '43':'REMNANTS - SLABS', '44':'TURF SUPPLIES', '45':'CLOSETS', '46':'BATH ACC & MIRRORS',
+  '49':'MATERIAL % BILLING', '60':'NET MATERIALS', '61':'FURN & APPL MOVE',
+  '62':'TRANS/MOLD/VENTS LAB', '63':'DEMO & DISPOSAL', '64':'UNDERLAY/PREP/SS LAB',
+  '65':'CARPET ROLL LABOR', '66':'CARPET TILE LABOR', '67':'VINYL ROLL LABOR',
+  '68':'VCT LABOR', '69':'LVP LVT WPC SPC LAB', '70':'RUBBER & SPORTS LAB',
+  '71':'CORK FLOOR LABOR', '72':'BAMBOO FLOOR LABOR', '73':'LAMINATE FLOOR LABOR',
+  '74':'HARDWOOD LABOR', '75':'FOS LABOR', '76':'TILE & STONE LABOR',
+  '77':'CONCRETE D&P LABOR', '78':'WALL COVERINGS LABOR', '79':'COVER/PROTECTION LAB',
+  '80':'WORKROOM LABOR', '81':'DELIVERY & TRIP FEES', '82':'CUSTOMER SERVICE LAB',
+  '83':'MISC SERVICES', '84':'WINDOW TREATMENT LAB', '85':'CABINET LABOR',
+  '86':'COUNTERTOP LABOR', '87':'TURF LABOR', '88':'CLOSET LABOR', '89':'BATH & MIRROR LABOR',
+  '96':'SAMPLES', '97':'PRE & POST INSPECT', '98':'LABOR % BILLING'
+};
+function productCodeLabel(code){
+  if(!code) return '—';
+  const name = PRODUCT_CODES[code];
+  return name ? `${code} · ${name}` : code;
+}
+
 const state = {
   poLines: [],
   loadedAt: null,
@@ -450,7 +484,7 @@ function storeOptionsList(){
 function productCodeOptionsList(){
   return Array.from(new Set(state.poLines.map(r=>r.product_code).filter(v=>v)))
     .sort((a,b)=>a.localeCompare(b))
-    .map(v=>({ value: v, label: v }));
+    .map(v=>({ value: v, label: productCodeLabel(v) }));
 }
 
 // counts per option for one filter dimension, honoring every OTHER active filter (facet counts)
@@ -690,7 +724,7 @@ function renderLargeOrders(){
           ${rows.length ? rows.map(r=>`
             <tr class="po-row" data-po="${r.po_number}">
               <td>${r.store ?? '—'}</td>
-              <td>${r.product_code || '—'}</td>
+              <td>${productCodeLabel(r.product_code)}</td>
               <td class="td-truncate" title="${escapeAttr((r.style_name||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
               <td>${Number(r.amount_ordered||0).toLocaleString()} ${r.units||''}</td>
               <td>${fmtDate(r.promise_date)}</td>
