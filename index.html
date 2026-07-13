@@ -672,12 +672,13 @@ function renderLargeFilterCardRow(labelText, dim, options){
   const counts = largeFacetCounts(dim);
   const totalCount = state.poLines.filter(r=>matchesLargeFilters(r, state.largeFilters, dim)).length;
   const activeVal = state.largeFilters[dim];
+  const visibleOptions = options.filter(o=>(counts.get(o.value)||0) > 0);
   return `
     <div class="filter-row">
       <div class="filter-row-label">${labelText}</div>
       <div class="filter-cards">
         <button type="button" class="filter-card large-filter-card ${!activeVal?'active':''}" data-dim="${dim}" data-value="">All <span class="count">${totalCount}</span></button>
-        ${options.map(o=>`<button type="button" class="filter-card large-filter-card ${activeVal===o.value?'active':''}" data-dim="${dim}" data-value="${o.value}">${o.label} <span class="count">${counts.get(o.value)||0}</span></button>`).join('')}
+        ${visibleOptions.map(o=>`<button type="button" class="filter-card large-filter-card ${activeVal===o.value?'active':''}" data-dim="${dim}" data-value="${o.value}">${o.label} <span class="count">${counts.get(o.value)||0}</span></button>`).join('')}
       </div>
     </div>
   `;
