@@ -747,7 +747,7 @@ function renderLargeOrders(){
     <div class="panel">
       <p style="color:var(--muted);font-size:13px;margin-top:0;">Open PO lines at or above the quantity threshold, so buyers can watch the ETA on the biggest orders.</p>
       <div class="toolbar">
-        <label>Min Qty <input type="number" id="f-large-threshold" value="${state.largeFilters.threshold}" min="0" step="500"></label>
+        <label>Min Qty <input type="text" inputmode="numeric" pattern="[0-9]*" id="f-large-threshold" value="${state.largeFilters.threshold}"></label>
         <label><input type="checkbox" id="f-large-activeOnly" ${state.largeFilters.activeOnly?'checked':''}> Active only</label>
         <span style="margin-left:auto;color:var(--muted);font-size:12.5px;">${rows.length.toLocaleString()} large order${rows.length===1?'':'s'}</span>
       </div>
