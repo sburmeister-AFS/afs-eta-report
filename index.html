@@ -44,7 +44,7 @@
   .promise-cell:hover{text-decoration:underline;text-decoration-style:dotted;}
   .pending-flag{margin-left:6px;}
   .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;}
-  .toolbar select, .toolbar input[type=text]{padding:7px 10px;border:1px solid var(--border);border-radius:7px;font-size:13px;background:#fff;}
+  .toolbar select, .toolbar input[type=text], .toolbar input[type=number]{padding:7px 10px;border:1px solid var(--border);border-radius:7px;font-size:13px;background:#fff;}
   .toolbar label{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px;}
   .filter-row{margin-bottom:14px;}
   .filter-row-label{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700;margin-bottom:7px;}
@@ -101,6 +101,7 @@
   <nav id="mainNav">
     <button data-view="rollup" class="active">Manager Rollup</button>
     <button data-view="open">All Open POs</button>
+    <button data-view="large">Large Orders</button>
     <button data-view="blanks">Blanks</button>
     <button data-view="upload" id="uploadTabBtn" class="hidden">Upload</button>
   </nav>
@@ -155,7 +156,9 @@ const state = {
   rollupMetric: 'dollars',   // 'dollars' | 'count'
   rollupGroupBy: 'ordered_by', // 'ordered_by' | 'store'
   filters: { orderedBy: '', store: '', supplier: '', bucket: '', worked: 'false', search: '', activeOnly: true },
-  sort: { col: 'past_days', dir: 'desc' }
+  sort: { col: 'past_days', dir: 'desc' },
+  largeFilters: { store: '', productCode: '', threshold: 10000, activeOnly: true },
+  largeSort: { col: 'amount_ordered', dir: 'desc' }
 };
 
 // ---------- date / bucket helpers ----------
@@ -284,6 +287,7 @@ function render(){
   const app = document.getElementById('app');
   if(state.view === 'rollup') app.innerHTML = renderRollup();
   else if(state.view === 'open') app.innerHTML = renderOpenTable();
+  else if(state.view === 'large') app.innerHTML = renderLargeOrders();
   else if(state.view === 'blanks') app.innerHTML = renderBlanks();
   else if(state.view === 'upload') app.innerHTML = renderUpload();
   attachViewHandlers();
@@ -438,6 +442,17 @@ function matchesFilters(r, filters, excludeDim){
 }
 function filterRows(filters){ return state.poLines.filter(r=>matchesFilters(r, filters, null)); }
 
+function storeOptionsList(){
+  return Array.from(new Set(state.poLines.map(r=>r.store).filter(v=>v!==null && v!==undefined)))
+    .sort((a,b)=>a-b)
+    .map(v=>({ value: String(v), label: `Store ${v}` }));
+}
+function productCodeOptionsList(){
+  return Array.from(new Set(state.poLines.map(r=>r.product_code).filter(v=>v)))
+    .sort((a,b)=>a.localeCompare(b))
+    .map(v=>({ value: v, label: v }));
+}
+
 // counts per option for one filter dimension, honoring every OTHER active filter (facet counts)
 function facetCounts(dim){
   const counts = new Map();
@@ -512,9 +527,7 @@ function renderOpenTable(){
   const orderedByOptions = Array.from(orderedByCanonicalLabels().entries())
     .map(([value,label])=>({ value, label }))
     .sort((a,b)=>a.label.localeCompare(b.label));
-  const storeOptions = Array.from(new Set(state.poLines.map(r=>r.store).filter(v=>v!==null && v!==undefined)))
-    .sort((a,b)=>a-b)
-    .map(v=>({ value: String(v), label: `Store ${v}` }));
+  const storeOptions = storeOptionsList();
   const bucketOptions = BUCKET_ORDER.map(b=>({ value: b, label: BUCKET_LABELS[b] }));
   const workedOptions = [{ value: 'false', label: 'Not Worked' }, { value: 'true', label: 'Worked' }];
 
@@ -593,6 +606,98 @@ function renderBlanks(){
               <td>${isBlankPast(r) ? '<span class="badge b28">past buffer</span>' : ''}</td>
             </tr>
           `).join('') : `<tr><td colspan="8" class="empty">No blank-promise-date POs.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ============================================================
+// LARGE ORDERS
+// ============================================================
+function matchesLargeFilters(r, filters, excludeDim){
+  if(filters.activeOnly && !r.is_active) return false;
+  if(Number(r.amount_ordered) < filters.threshold) return false;
+  if(excludeDim!=='store' && filters.store && String(r.store) !== filters.store) return false;
+  if(excludeDim!=='productCode' && filters.productCode && r.product_code !== filters.productCode) return false;
+  return true;
+}
+function largeFacetCounts(dim){
+  const counts = new Map();
+  state.poLines.forEach(r=>{
+    if(!matchesLargeFilters(r, state.largeFilters, dim)) return;
+    let key;
+    if(dim === 'store') key = (r.store===null||r.store===undefined) ? null : String(r.store);
+    else if(dim === 'productCode') key = r.product_code || null;
+    if(key === null) return;
+    counts.set(key, (counts.get(key)||0) + 1);
+  });
+  return counts;
+}
+function renderLargeFilterCardRow(labelText, dim, options){
+  const counts = largeFacetCounts(dim);
+  const totalCount = state.poLines.filter(r=>matchesLargeFilters(r, state.largeFilters, dim)).length;
+  const activeVal = state.largeFilters[dim];
+  return `
+    <div class="filter-row">
+      <div class="filter-row-label">${labelText}</div>
+      <div class="filter-cards">
+        <button type="button" class="filter-card large-filter-card ${!activeVal?'active':''}" data-dim="${dim}" data-value="">All <span class="count">${totalCount}</span></button>
+        ${options.map(o=>`<button type="button" class="filter-card large-filter-card ${activeVal===o.value?'active':''}" data-dim="${dim}" data-value="${o.value}">${o.label} <span class="count">${counts.get(o.value)||0}</span></button>`).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderLargeOrders(){
+  const storeOptions = storeOptionsList();
+  const productCodeOptions = productCodeOptionsList();
+
+  let rows = state.poLines.filter(r=>matchesLargeFilters(r, state.largeFilters, null));
+
+  const { col, dir } = state.largeSort;
+  rows.sort((a,b)=>{
+    let av = a[col], bv = b[col];
+    if(col === 'amount_ordered'){ av = Number(a.amount_ordered)||0; bv = Number(b.amount_ordered)||0; }
+    if(av === null || av === undefined) av = '';
+    if(bv === null || bv === undefined) bv = '';
+    if(av < bv) return dir==='asc' ? -1 : 1;
+    if(av > bv) return dir==='asc' ? 1 : -1;
+    return 0;
+  });
+
+  return `
+    <div class="panel">
+      <p style="color:var(--muted);font-size:13px;margin-top:0;">Open PO lines at or above the quantity threshold, so buyers can watch the ETA on the biggest orders.</p>
+      <div class="toolbar">
+        <label>Min Qty <input type="number" id="f-large-threshold" value="${state.largeFilters.threshold}" min="0" step="500"></label>
+        <label><input type="checkbox" id="f-large-activeOnly" ${state.largeFilters.activeOnly?'checked':''}> Active only</label>
+        <span style="margin-left:auto;color:var(--muted);font-size:12.5px;">${rows.length.toLocaleString()} large order${rows.length===1?'':'s'}</span>
+      </div>
+      ${renderLargeFilterCardRow('Store', 'store', storeOptions)}
+      ${renderLargeFilterCardRow('Product Code', 'productCode', productCodeOptions)}
+      <table>
+        <thead><tr>
+          <th data-col="store">Store</th>
+          <th data-col="product_code">Product Code</th>
+          <th data-col="style_name">Style / Color</th>
+          <th data-col="amount_ordered">Qty on Order</th>
+          <th data-col="promise_date">ETA</th>
+          <th data-col="supplier">Supplier</th>
+          <th data-col="po_number">PO Number</th>
+        </tr></thead>
+        <tbody>
+          ${rows.length ? rows.map(r=>`
+            <tr class="po-row" data-po="${r.po_number}">
+              <td>${r.store ?? '—'}</td>
+              <td>${r.product_code || '—'}</td>
+              <td class="td-truncate" title="${escapeAttr((r.style_name||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
+              <td>${Number(r.amount_ordered||0).toLocaleString()} ${r.units||''}</td>
+              <td>${fmtDate(r.promise_date)}</td>
+              <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
+              <td>${r.po_number}</td>
+            </tr>
+          `).join('') : `<tr><td colspan="7" class="empty">No open POs at or above this quantity.</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -945,6 +1050,29 @@ function attachViewHandlers(){
     document.getElementById('groupToggle')?.addEventListener('click', (e)=>{
       const b = e.target.closest('button[data-group]'); if(!b) return;
       state.rollupGroupBy = b.dataset.group; render();
+    });
+  }
+
+  if(state.view === 'large'){
+    document.querySelectorAll('.large-filter-card').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        state.largeFilters[btn.dataset.dim] = btn.dataset.value;
+        render();
+      });
+    });
+    document.getElementById('f-large-threshold')?.addEventListener('input', (e)=>{
+      const v = parseFloat(e.target.value);
+      state.largeFilters.threshold = isNaN(v) ? 0 : v;
+      render();
+    });
+    document.getElementById('f-large-activeOnly')?.addEventListener('change', (e)=>{ state.largeFilters.activeOnly = e.target.checked; render(); });
+    document.querySelectorAll('th[data-col]').forEach(th=>{
+      th.addEventListener('click', ()=>{
+        const col = th.dataset.col;
+        if(state.largeSort.col === col) state.largeSort.dir = state.largeSort.dir==='asc' ? 'desc' : 'asc';
+        else { state.largeSort.col = col; state.largeSort.dir = 'asc'; }
+        render();
+      });
     });
   }
 
