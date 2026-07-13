@@ -199,6 +199,23 @@ const state = {
 function todayLocalMidnight(){ const d = new Date(); d.setHours(0,0,0,0); return d; }
 function parseDateStr(s){ if(!s) return null; const d = new Date(s + 'T00:00:00'); return isNaN(d) ? null : d; }
 function daysBetween(a,b){ return Math.round((a - b) / 86400000); }
+function toDateStr(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+function mondayOfWeek(d){ const monday = new Date(d); monday.setDate(d.getDate() - ((d.getDay()+6)%7)); return monday; }
+
+// Presets for the Large Orders ETA filter: business week runs Monday-Saturday.
+function etaPresetRanges(){
+  const today = todayLocalMidnight();
+  const monday = mondayOfWeek(today);
+  const thisWeekEnd = new Date(monday); thisWeekEnd.setDate(monday.getDate()+5);
+  const nextMonday = new Date(monday); nextMonday.setDate(monday.getDate()+7);
+  const nextWeekEnd = new Date(nextMonday); nextWeekEnd.setDate(nextMonday.getDate()+5);
+  const next30End = new Date(today); next30End.setDate(today.getDate()+30);
+  return {
+    thisWeek: { from: toDateStr(monday), to: toDateStr(thisWeekEnd) },
+    nextWeek: { from: toDateStr(nextMonday), to: toDateStr(nextWeekEnd) },
+    next30: { from: toDateStr(today), to: toDateStr(next30End) }
+  };
+}
 
 function pastDaysOf(row){
   if(!row.promise_date) return null;
@@ -729,6 +746,20 @@ function renderLargeOrders(){
         `}
         ${(state.largeFilters.etaDate || state.largeFilters.etaFrom || state.largeFilters.etaTo) ? `<button type="button" class="btn secondary" id="clearEtaBtn">Clear</button>` : ''}
       </div>
+      <div class="toolbar">
+        <span style="font-weight:700;">Quick pick:</span>
+        ${(()=>{
+          const p = etaPresetRanges();
+          const isActive = (key)=> state.largeFilters.etaMode==='range' && state.largeFilters.etaFrom===p[key].from && state.largeFilters.etaTo===p[key].to;
+          return `
+            <div class="toggle-group" id="etaPresetGroup">
+              <button type="button" data-preset="thisWeek" class="${isActive('thisWeek')?'active':''}">This Week (Mon-Sat)</button>
+              <button type="button" data-preset="nextWeek" class="${isActive('nextWeek')?'active':''}">Next Week (Mon-Sat)</button>
+              <button type="button" data-preset="next30" class="${isActive('next30')?'active':''}">Next 30 Days</button>
+            </div>
+          `;
+        })()}
+      </div>
       ${renderLargeFilterCardRow('Store', 'store', storeOptions)}
       ${renderLargeFilterCardRow('Product Code', 'productCode', productCodeOptions)}
       <table>
@@ -1131,6 +1162,14 @@ function attachViewHandlers(){
     document.getElementById('f-large-eta-to')?.addEventListener('change', (e)=>{ state.largeFilters.etaTo = e.target.value; render(); });
     document.getElementById('clearEtaBtn')?.addEventListener('click', ()=>{
       state.largeFilters.etaDate = ''; state.largeFilters.etaFrom = ''; state.largeFilters.etaTo = '';
+      render();
+    });
+    document.getElementById('etaPresetGroup')?.addEventListener('click', (e)=>{
+      const b = e.target.closest('button[data-preset]'); if(!b) return;
+      const range = etaPresetRanges()[b.dataset.preset];
+      state.largeFilters.etaMode = 'range';
+      state.largeFilters.etaFrom = range.from;
+      state.largeFilters.etaTo = range.to;
       render();
     });
     document.querySelectorAll('th[data-col]').forEach(th=>{
