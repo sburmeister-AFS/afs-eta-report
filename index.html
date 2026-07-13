@@ -193,7 +193,7 @@ const state = {
   rollupGroupBy: 'ordered_by', // 'ordered_by' | 'store'
   filters: { orderedBy: '', store: '', supplier: '', bucket: '', worked: 'false', search: '', activeOnly: true },
   sort: { col: 'past_days', dir: 'desc' },
-  largeFilters: { store: '', productCode: '', threshold: 10000, activeOnly: true, etaMode: 'range', etaDate: '', etaFrom: '', etaTo: '' },
+  largeFilters: { store: '', productCode: '', threshold: 10000, activeOnly: true, etaMode: 'range', etaDate: '', etaFrom: '', etaTo: '', poSearch: '' },
   largeSort: { col: 'amount_ordered', dir: 'desc' }
 };
 
@@ -696,6 +696,7 @@ function matchesLargeFilters(r, filters, excludeDim){
     if(filters.etaFrom && (!r.promise_date || r.promise_date < filters.etaFrom)) return false;
     if(filters.etaTo && (!r.promise_date || r.promise_date > filters.etaTo)) return false;
   }
+  if(filters.poSearch && !(r.po_number||'').toLowerCase().includes(filters.poSearch.toLowerCase())) return false;
   return true;
 }
 function largeFacetCounts(dim){
@@ -750,6 +751,7 @@ function renderLargeOrders(){
         <label>Min Qty <input type="text" inputmode="numeric" pattern="[0-9]*" id="f-large-threshold" value="${state.largeFilters.threshold}"></label>
         <label><input type="checkbox" id="f-large-activeOnly" ${state.largeFilters.activeOnly?'checked':''}> Active only</label>
         <span style="margin-left:auto;color:var(--muted);font-size:12.5px;">${rows.length.toLocaleString()} large order${rows.length===1?'':'s'}</span>
+        <input type="text" id="f-large-po-search" placeholder="Search PO #…" value="${escapeAttr(state.largeFilters.poSearch)}" style="min-width:200px;">
       </div>
       <div class="toolbar">
         <span style="font-weight:700;">ETA:</span>
@@ -1171,6 +1173,7 @@ function attachViewHandlers(){
       render();
     });
     document.getElementById('f-large-activeOnly')?.addEventListener('change', (e)=>{ state.largeFilters.activeOnly = e.target.checked; render(); });
+    document.getElementById('f-large-po-search')?.addEventListener('input', (e)=>{ state.largeFilters.poSearch = e.target.value; render(); });
     document.getElementById('etaModeToggle')?.addEventListener('click', (e)=>{
       const b = e.target.closest('button[data-etamode]'); if(!b) return;
       state.largeFilters.etaMode = b.dataset.etamode;
