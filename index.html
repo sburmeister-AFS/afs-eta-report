@@ -154,7 +154,7 @@ const state = {
   view: 'rollup',
   rollupMetric: 'dollars',   // 'dollars' | 'count'
   rollupGroupBy: 'ordered_by', // 'ordered_by' | 'store'
-  filters: { orderedBy: '', store: '', supplier: '', bucket: '', search: '', activeOnly: true },
+  filters: { orderedBy: '', store: '', supplier: '', bucket: '', worked: '', search: '', activeOnly: true },
   sort: { col: 'past_days', dir: 'desc' }
 };
 
@@ -427,6 +427,7 @@ function matchesFilters(r, filters, excludeDim){
   if(excludeDim!=='orderedBy' && filters.orderedBy && nameKey(r.ordered_by) !== filters.orderedBy) return false;
   if(excludeDim!=='store' && filters.store && String(r.store) !== filters.store) return false;
   if(excludeDim!=='bucket' && filters.bucket && bucketOf(r) !== filters.bucket) return false;
+  if(excludeDim!=='worked' && filters.worked && String(!!r.worked) !== filters.worked) return false;
   if(filters.supplier && !(r.supplier||'').toLowerCase().includes(filters.supplier.toLowerCase())) return false;
   if(filters.search){
     const s = filters.search.toLowerCase();
@@ -445,6 +446,7 @@ function facetCounts(dim){
     let key;
     if(dim === 'orderedBy') key = r.ordered_by ? nameKey(r.ordered_by) : null;
     else if(dim === 'store') key = (r.store===null||r.store===undefined) ? null : String(r.store);
+    else if(dim === 'worked') key = String(!!r.worked);
     else key = bucketOf(r);
     if(key === null) return;
     counts.set(key, (counts.get(key)||0) + 1);
@@ -514,6 +516,7 @@ function renderOpenTable(){
     .sort((a,b)=>a-b)
     .map(v=>({ value: String(v), label: `Store ${v}` }));
   const bucketOptions = BUCKET_ORDER.map(b=>({ value: b, label: BUCKET_LABELS[b] }));
+  const workedOptions = [{ value: 'false', label: 'Not Worked' }, { value: 'true', label: 'Worked' }];
 
   const CAP = 500;
   const shown = rows.slice(0, CAP);
@@ -523,6 +526,7 @@ function renderOpenTable(){
       ${renderFilterCardRow('Ordered By', 'orderedBy', orderedByOptions)}
       ${renderFilterCardRow('Store', 'store', storeOptions)}
       ${renderFilterCardRow('Bucket', 'bucket', bucketOptions)}
+      ${renderFilterCardRow('Stage', 'worked', workedOptions)}
       <div class="toolbar">
         <input type="text" id="f-supplier" placeholder="Supplier…" value="${state.filters.supplier}">
         <input type="text" id="f-search" placeholder="Search PO / style / sidemark / ref#…" value="${state.filters.search}" style="min-width:220px;">
@@ -532,6 +536,7 @@ function renderOpenTable(){
       </div>
       <table>
         <thead><tr>
+          <th data-col="worked">Worked</th>
           <th data-col="store">Store</th>
           <th data-col="supplier">Supplier</th>
           <th data-col="po_number">PO Number</th>
@@ -546,6 +551,7 @@ function renderOpenTable(){
         <tbody>
           ${shown.length ? shown.map(r=>`
             <tr class="po-row" data-po="${r.po_number}">
+              <td><input type="checkbox" class="worked-checkbox" data-po="${r.po_number}" ${r.worked?'checked':''}></td>
               <td>${r.store ?? '—'}</td>
               <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
               <td>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''}</td>
@@ -557,7 +563,7 @@ function renderOpenTable(){
               <td>${fmtMoney(r.total_cost)}</td>
               <td>${r.reference_number || ''}</td>
             </tr>
-          `).join('') : `<tr><td colspan="10" class="empty">No POs match these filters.</td></tr>`}
+          `).join('') : `<tr><td colspan="11" class="empty">No POs match these filters.</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -817,6 +823,8 @@ async function openHistoryModal(poNumber){
     else if(ev.event_type === 'unverified_update'){
       body = (ev.changes||[]).map(c=>`<div class="tl-diff"><span class="f">${c.field}:</span> ${c.old ?? '—'} → <strong>${c.new ?? '—'}</strong> <span style="color:var(--warn);">(unverified — not yet confirmed in RFMS)</span></div>`).join('');
     }
+    else if(ev.event_type === 'worked'){ body = 'Marked as worked.'; }
+    else if(ev.event_type === 'unworked'){ body = 'Unmarked as worked.'; }
     return `<div class="tl-event">
       <div class="tl-date">${new Date(ev.detected_at).toLocaleString()}</div>
       <div class="tl-type">${ev.event_type}</div>
@@ -899,6 +907,27 @@ async function savePromiseUpdate(poNumber){
 }
 
 // ============================================================
+// Worked stage (checkbox on All Open POs)
+// ============================================================
+async function toggleWorked(poNumber, checked, checkboxEl){
+  const row = state.poLines.find(r=>r.po_number === poNumber);
+  if(!row) return;
+  const nowIso = new Date().toISOString();
+  try{
+    const { error } = await sb.from('po_lines').update({ worked: checked, worked_at: checked ? nowIso : null }).eq('po_number', poNumber);
+    if(error) throw error;
+    const { error: histErr } = await sb.from('po_line_history').insert({ po_number: poNumber, batch_id: null, event_type: checked ? 'worked' : 'unworked', changes: null, detected_at: nowIso });
+    if(histErr) throw histErr;
+    row.worked = checked;
+    row.worked_at = checked ? nowIso : null;
+    render();
+  } catch(err){
+    checkboxEl.checked = !checked; // revert on failure
+    alert('Error updating worked status: ' + err.message);
+  }
+}
+
+// ============================================================
 // view-level event wiring
 // ============================================================
 function attachViewHandlers(){
@@ -929,6 +958,10 @@ function attachViewHandlers(){
     document.querySelectorAll('td.promise-cell').forEach(td=>{
       td.addEventListener('click', (e)=>{ e.stopPropagation(); openPromiseEditModal(td.dataset.po); });
     });
+    document.querySelectorAll('.worked-checkbox').forEach(cb=>{
+      cb.addEventListener('click', (e)=>e.stopPropagation());
+      cb.addEventListener('change', (e)=>{ toggleWorked(cb.dataset.po, cb.checked, cb); });
+    });
     document.getElementById('f-supplier')?.addEventListener('input', (e)=>{ state.filters.supplier = e.target.value; render(); });
     document.getElementById('f-search')?.addEventListener('input', (e)=>{ state.filters.search = e.target.value; render(); });
     document.getElementById('f-activeOnly')?.addEventListener('change', (e)=>{ state.filters.activeOnly = e.target.checked; render(); });
@@ -947,7 +980,7 @@ function attachViewHandlers(){
 function exportCsv(){
   const rows = filterRows(state.filters);
   const csv = Papa.unparse(rows.map(r=>({
-    Store: r.store, Supplier: r.supplier, 'PO Number': r.po_number, Style: r.style_name, Color: r.color_desc,
+    Worked: r.worked ? 'Yes' : 'No', Store: r.store, Supplier: r.supplier, 'PO Number': r.po_number, Style: r.style_name, Color: r.color_desc,
     'Ordered By': r.ordered_by, 'Order Date': r.order_date, 'Promise Date': r.promise_date,
     'Past Days': pastDaysOf(r), Bucket: BUCKET_LABELS[bucketOf(r)], 'Total Cost': r.total_cost, 'Reference #': r.reference_number
   })));

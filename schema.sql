@@ -38,7 +38,9 @@ create table if not exists public.po_lines (
   last_seen_batch_id bigint references public.report_batches(id),
   last_seen_at timestamptz not null default now(),
   is_active boolean not null default true,
-  pending_promise_date date -- proposed date entered in-app but not yet confirmed in RFMS
+  pending_promise_date date, -- proposed date entered in-app but not yet confirmed in RFMS
+  worked boolean not null default false, -- buyer has worked this PO from the All Open POs page
+  worked_at timestamptz
 );
 
 create index if not exists po_lines_ordered_by_idx on public.po_lines (ordered_by);
@@ -55,7 +57,7 @@ create table if not exists public.po_line_history (
   id bigint generated always as identity primary key,
   po_number text not null references public.po_lines(po_number) on delete cascade,
   batch_id bigint references public.report_batches(id),
-  event_type text not null check (event_type in ('created','updated','closed','reappeared','manual_update','unverified_update')),
+  event_type text not null check (event_type in ('created','updated','closed','reappeared','manual_update','unverified_update','worked','unworked')),
   changes jsonb,
   detected_at timestamptz not null default now()
 );
