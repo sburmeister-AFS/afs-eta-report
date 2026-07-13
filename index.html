@@ -40,6 +40,8 @@
   .td-truncate-sm{max-width:160px;}
   tr.po-row{cursor:pointer;}
   tr.po-row:hover{background:#f2f5fc;}
+  tr.po-row.pastdue{background:var(--bad-bg);}
+  tr.po-row.pastdue:hover{background:#fbdfe1;}
   .promise-cell{cursor:pointer;}
   .promise-cell:hover{text-decoration:underline;text-decoration-style:dotted;}
   .pending-flag{margin-left:6px;}
@@ -336,12 +338,29 @@ function closeModal(){ document.getElementById('modalRoot').innerHTML = ''; }
 // ---------- render dispatch ----------
 function render(){
   const app = document.getElementById('app');
+  // Full re-render replaces every input's DOM node, which would otherwise drop focus
+  // after each keystroke. Remember what was focused (and cursor position) and restore it.
+  const active = document.activeElement;
+  const focusInfo = (active && active.id && app.contains(active))
+    ? { id: active.id, selStart: active.selectionStart, selEnd: active.selectionEnd }
+    : null;
+
   if(state.view === 'rollup') app.innerHTML = renderRollup();
   else if(state.view === 'open') app.innerHTML = renderOpenTable();
   else if(state.view === 'large') app.innerHTML = renderLargeOrders();
   else if(state.view === 'blanks') app.innerHTML = renderBlanks();
   else if(state.view === 'upload') app.innerHTML = renderUpload();
   attachViewHandlers();
+
+  if(focusInfo){
+    const el = document.getElementById(focusInfo.id);
+    if(el){
+      el.focus();
+      if(typeof el.setSelectionRange === 'function' && focusInfo.selStart != null){
+        try { el.setSelectionRange(focusInfo.selStart, focusInfo.selEnd); } catch(e){}
+      }
+    }
+  }
 }
 
 // ============================================================
@@ -774,7 +793,7 @@ function renderLargeOrders(){
         </tr></thead>
         <tbody>
           ${rows.length ? rows.map(r=>`
-            <tr class="po-row" data-po="${r.po_number}">
+            <tr class="po-row ${pastDaysOf(r) > 0 ? 'pastdue' : ''}" data-po="${r.po_number}">
               <td>${r.store ?? '—'}</td>
               <td>${productCodeLabel(r.product_code)}</td>
               <td class="td-truncate" title="${escapeAttr((r.style_name||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
