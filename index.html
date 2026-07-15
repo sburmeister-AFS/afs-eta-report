@@ -193,7 +193,7 @@ const state = {
   view: 'rollup',
   rollupMetric: 'dollars',   // 'dollars' | 'count'
   rollupGroupBy: 'ordered_by', // 'ordered_by' | 'store'
-  filters: { orderedBy: '', store: '', supplier: '', vendor: '', bucket: '', worked: 'false', search: '', activeOnly: true },
+  filters: { orderedBy: '', store: '', supplier: '', vendor: '', bucket: '', worked: 'false', search: '', activeOnly: true, purchasingOnly: false },
   sort: { col: 'past_days', dir: 'desc' },
   largeFilters: { store: '', productCode: '', threshold: 10000, activeOnly: true, etaMode: 'range', etaDate: '', etaFrom: '', etaTo: '', poSearch: '' },
   largeSort: { col: 'amount_ordered', dir: 'desc' }
@@ -498,8 +498,22 @@ function renderRollup(){
 // spellings of the same person aggregate into one filter card instead of three.
 function nameKey(name){ return (name||'').toUpperCase().replace(/[^A-Z0-9]/g,''); }
 
+// Purchasing team roster for the "Purchasing Associates Only" filter. Ordered By values in
+// the data are inconsistent (full name vs. last-name-only vs. truncated, e.g. "Devan
+// Stonebraker" shows up as "DEVAN.STONEBRAK") so this matches on nameKey substring in either
+// direction rather than requiring an exact match.
+const PURCHASING_ASSOCIATE_KEYS = ['Alani Copas','Chris Rose','Devan Stonebraker','Aundrea Wells',
+  'Marissa Devore','Dave Levisay','Scott Burmeister','Todd Gies','Jude Hoferkamp','Mikel Hartman'
+].map(nameKey);
+function isPurchasingAssociate(orderedBy){
+  const key = nameKey(orderedBy);
+  if(!key) return false;
+  return PURCHASING_ASSOCIATE_KEYS.some(assocKey => key.includes(assocKey) || assocKey.includes(key));
+}
+
 function matchesFilters(r, filters, excludeDim){
   if(filters.activeOnly && !r.is_active) return false;
+  if(filters.purchasingOnly && !isPurchasingAssociate(r.ordered_by)) return false;
   if(excludeDim!=='orderedBy' && filters.orderedBy && nameKey(r.ordered_by) !== filters.orderedBy) return false;
   if(excludeDim!=='store' && filters.store && String(r.store) !== filters.store) return false;
   if(excludeDim!=='bucket' && filters.bucket && bucketOf(r) !== filters.bucket) return false;
@@ -626,6 +640,7 @@ function renderOpenTable(){
         <input type="text" id="f-supplier" placeholder="Supplier…" value="${state.filters.supplier}">
         <input type="text" id="f-search" placeholder="Search PO / style / sidemark / ref#…" value="${state.filters.search}" style="min-width:220px;">
         <label><input type="checkbox" id="f-activeOnly" ${state.filters.activeOnly?'checked':''}> Active only</label>
+        <label><input type="checkbox" id="f-purchasingOnly" ${state.filters.purchasingOnly?'checked':''}> Purchasing associates only</label>
         <button class="btn secondary" id="exportBtn">Export CSV</button>
         <span style="margin-left:auto;color:var(--muted);font-size:12.5px;">${rows.length.toLocaleString()} PO${rows.length===1?'':'s'}${rows.length>CAP?` (showing first ${CAP})`:''}</span>
       </div>
@@ -1243,6 +1258,7 @@ function attachViewHandlers(){
     document.getElementById('f-supplier')?.addEventListener('input', (e)=>{ state.filters.supplier = e.target.value; render(); });
     document.getElementById('f-search')?.addEventListener('input', (e)=>{ state.filters.search = e.target.value; render(); });
     document.getElementById('f-activeOnly')?.addEventListener('change', (e)=>{ state.filters.activeOnly = e.target.checked; render(); });
+    document.getElementById('f-purchasingOnly')?.addEventListener('change', (e)=>{ state.filters.purchasingOnly = e.target.checked; render(); });
     document.getElementById('exportBtn')?.addEventListener('click', exportCsv);
     document.querySelectorAll('th[data-col]').forEach(th=>{
       th.addEventListener('click', ()=>{
