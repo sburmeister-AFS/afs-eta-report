@@ -196,7 +196,7 @@ const state = {
   view: 'rollup',
   rollupMetric: 'dollars',   // 'dollars' | 'count'
   rollupGroupBy: 'ordered_by', // 'ordered_by' | 'store'
-  rollupScope: 'all', // 'all' | 'purchasing' - purchasing scopes the scorecard + table to just the 10-person roster
+  rollupScope: 'purchasing', // 'all' | 'purchasing' - purchasing scopes the scorecard + table to just the 10-person roster
   // orderedBy/store/vendor/bucket/worked are multiselect: an array of selected values,
   // empty array = "All" (no filter on that dimension).
   filters: { orderedBy: [], store: [], supplier: '', vendor: [], bucket: [], worked: ['false'], search: '', activeOnly: true, purchasingOnly: false, receivedStatus: '' },
