@@ -195,6 +195,7 @@ const state = {
   rollupGroupBy: 'ordered_by', // 'ordered_by' | 'store'
   filters: { orderedBy: '', store: '', supplier: '', vendor: '', bucket: '', worked: 'false', search: '', activeOnly: true, purchasingOnly: false },
   sort: { col: 'past_days', dir: 'desc' },
+  showCost: false,
   largeFilters: { store: '', productCode: '', threshold: 10000, activeOnly: true, etaMode: 'range', etaDate: '', etaFrom: '', etaTo: '', poSearch: '' },
   largeSort: { col: 'amount_ordered', dir: 'desc' }
 };
@@ -644,6 +645,7 @@ function renderOpenTable(){
         <input type="text" id="f-search" placeholder="Search PO / style / sidemark / ref#…" value="${state.filters.search}" style="min-width:220px;">
         <label><input type="checkbox" id="f-activeOnly" ${state.filters.activeOnly?'checked':''}> Active only</label>
         <label><input type="checkbox" id="f-purchasingOnly" ${state.filters.purchasingOnly?'checked':''}> Purchasing associates only</label>
+        <label><input type="checkbox" id="f-showCost" ${state.showCost?'checked':''}> Show Cost</label>
         <button class="btn secondary" id="exportBtn">Export CSV</button>
         <span style="margin-left:auto;color:var(--muted);font-size:12.5px;">${rows.length.toLocaleString()} PO${rows.length===1?'':'s'}${rows.length>CAP?` (showing first ${CAP})`:''}</span>
       </div>
@@ -653,13 +655,14 @@ function renderOpenTable(){
           <th data-col="store">Store</th>
           <th data-col="supplier">Supplier</th>
           <th data-col="po_number">PO Number</th>
+          <th data-col="reference_number">Reference #</th>
           <th data-col="style_name">Style / Color</th>
+          <th data-col="amount_ordered">Qty Ordered</th>
           <th data-col="ordered_by">Ordered By</th>
           <th data-col="order_date">Order Date</th>
           <th data-col="promise_date">Promise Date</th>
           <th data-col="past_days">Status</th>
-          <th data-col="total_cost">Total Cost</th>
-          <th data-col="reference_number">Reference #</th>
+          ${state.showCost ? `<th data-col="total_cost">Total Cost</th>` : ''}
         </tr></thead>
         <tbody>
           ${shown.length ? shown.map(r=>`
@@ -668,15 +671,16 @@ function renderOpenTable(){
               <td>${r.store ?? '—'}</td>
               <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
               <td>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
+              <td>${r.reference_number || ''}</td>
               <td class="td-truncate" title="${escapeAttr((r.style_name||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
+              <td>${r.amount_ordered!=null ? Number(r.amount_ordered).toLocaleString() : '—'} ${r.units||''}</td>
               <td>${r.ordered_by || '—'}</td>
               <td>${fmtDate(r.order_date)}</td>
               <td class="promise-cell" data-po="${r.po_number}" title="Click to update the promise date">${fmtDate(r.promise_date)}${r.pending_promise_date ? ` <span class="badge b7 pending-flag" title="Unverified proposed date: ${fmtDate(r.pending_promise_date)} — not yet confirmed in RFMS">? ${fmtDate(r.pending_promise_date)}</span>` : ''}</td>
               <td><span class="badge ${bucketOf(r)}">${fmtPastDays(r)}</span></td>
-              <td>${fmtMoney(r.total_cost)}</td>
-              <td>${r.reference_number || ''}</td>
+              ${state.showCost ? `<td>${fmtMoney(r.total_cost)}</td>` : ''}
             </tr>
-          `).join('') : `<tr><td colspan="11" class="empty">No POs match these filters.</td></tr>`}
+          `).join('') : `<tr><td colspan="${state.showCost ? 12 : 11}" class="empty">No POs match these filters.</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -1266,6 +1270,7 @@ function attachViewHandlers(){
     document.getElementById('f-search')?.addEventListener('input', (e)=>{ state.filters.search = e.target.value; render(); });
     document.getElementById('f-activeOnly')?.addEventListener('change', (e)=>{ state.filters.activeOnly = e.target.checked; render(); });
     document.getElementById('f-purchasingOnly')?.addEventListener('change', (e)=>{ state.filters.purchasingOnly = e.target.checked; render(); });
+    document.getElementById('f-showCost')?.addEventListener('change', (e)=>{ state.showCost = e.target.checked; render(); });
     document.getElementById('exportBtn')?.addEventListener('click', exportCsv);
     document.querySelectorAll('th[data-col]').forEach(th=>{
       th.addEventListener('click', ()=>{
