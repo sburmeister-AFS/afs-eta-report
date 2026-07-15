@@ -106,7 +106,6 @@
     <button data-view="rollup" class="active">Manager Rollup</button>
     <button data-view="open">All Open POs</button>
     <button data-view="large">Large Orders</button>
-    <button data-view="blanks">Blanks</button>
     <button data-view="upload" id="uploadTabBtn" class="hidden">Upload</button>
   </nav>
   <button id="adminBtn">🔒 Admin</button>
@@ -124,7 +123,6 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const ADMIN_PW = 'afs2026'; // change this to whatever you like
 
-const BLANK_PAST_BUFFER_DAYS = 5; // mirrors the workbook's $AV$1 = 5
 
 const GOALS = {
   dollars: { current: 0.90, b7: 0.10, b14: 0.00, b21: 0.00, b28: 0.00, blank: 0.00 },
@@ -193,10 +191,12 @@ const state = {
   view: 'rollup',
   rollupMetric: 'dollars',   // 'dollars' | 'count'
   rollupGroupBy: 'ordered_by', // 'ordered_by' | 'store'
-  filters: { orderedBy: '', store: '', supplier: '', vendor: '', bucket: '', worked: 'false', search: '', activeOnly: true, purchasingOnly: false, receivedStatus: '' },
+  // orderedBy/store/vendor/bucket/worked are multiselect: an array of selected values,
+  // empty array = "All" (no filter on that dimension).
+  filters: { orderedBy: [], store: [], supplier: '', vendor: [], bucket: [], worked: ['false'], search: '', activeOnly: true, purchasingOnly: false, receivedStatus: '' },
   sort: { col: 'past_days', dir: 'desc' },
   showCost: false,
-  largeFilters: { store: '', productCode: '', threshold: 10000, activeOnly: true, etaMode: 'range', etaDate: '', etaFrom: '', etaTo: '', poSearch: '' },
+  largeFilters: { store: [], productCode: [], threshold: 10000, activeOnly: true, etaMode: 'range', etaDate: '', etaFrom: '', etaTo: '', poSearch: '' },
   largeSort: { col: 'amount_ordered', dir: 'desc' }
 };
 
@@ -237,13 +237,6 @@ function bucketOf(row){
   if(d <= 20) return 'b14';
   if(d <= 27) return 'b21';
   return 'b28';
-}
-function isBlankPast(row){
-  if(row.promise_date) return false;
-  if(!row.order_date) return false;
-  const od = parseDateStr(row.order_date);
-  if(!od) return false;
-  return daysBetween(todayLocalMidnight(), od) >= BLANK_PAST_BUFFER_DAYS;
 }
 const BUCKET_LABELS = { current:'Current', b7:'7 Days Past', b14:'14 Days Past', b21:'21 Days Past', b28:'28+ Days Past', blank:'Blank' };
 const BUCKET_ORDER = ['current','b7','b14','b21','b28','blank'];
@@ -351,7 +344,6 @@ function render(){
   if(state.view === 'rollup') app.innerHTML = renderRollup();
   else if(state.view === 'open') app.innerHTML = renderOpenTable();
   else if(state.view === 'large') app.innerHTML = renderLargeOrders();
-  else if(state.view === 'blanks') app.innerHTML = renderBlanks();
   else if(state.view === 'upload') app.innerHTML = renderUpload();
   attachViewHandlers();
 
@@ -523,14 +515,23 @@ function receivedStatusOf(row){
   return 'full';
 }
 
+// Shared click behavior for multiselect filter cards: clicking "All" (value === '') clears
+// the selection; clicking a value toggles it in/out of the array.
+function toggleFilterValue(filtersObj, dim, value){
+  if(value === ''){ filtersObj[dim] = []; return; }
+  const arr = filtersObj[dim];
+  const idx = arr.indexOf(value);
+  if(idx === -1) arr.push(value); else arr.splice(idx, 1);
+}
+
 function matchesFilters(r, filters, excludeDim){
   if(filters.activeOnly && !r.is_active) return false;
   if(filters.purchasingOnly && !isPurchasingAssociate(r.ordered_by)) return false;
-  if(excludeDim!=='orderedBy' && filters.orderedBy && nameKey(r.ordered_by) !== filters.orderedBy) return false;
-  if(excludeDim!=='store' && filters.store && String(r.store) !== filters.store) return false;
-  if(excludeDim!=='bucket' && filters.bucket && bucketOf(r) !== filters.bucket) return false;
-  if(excludeDim!=='worked' && filters.worked && String(!!r.worked) !== filters.worked) return false;
-  if(excludeDim!=='vendor' && filters.vendor && r.supplier !== filters.vendor) return false;
+  if(excludeDim!=='orderedBy' && filters.orderedBy.length && !filters.orderedBy.includes(nameKey(r.ordered_by))) return false;
+  if(excludeDim!=='store' && filters.store.length && !filters.store.includes(String(r.store))) return false;
+  if(excludeDim!=='bucket' && filters.bucket.length && !filters.bucket.includes(bucketOf(r))) return false;
+  if(excludeDim!=='worked' && filters.worked.length && !filters.worked.includes(String(!!r.worked))) return false;
+  if(excludeDim!=='vendor' && filters.vendor.length && !filters.vendor.includes(r.supplier)) return false;
   if(filters.receivedStatus && receivedStatusOf(r) !== filters.receivedStatus) return false;
   if(filters.supplier && !(r.supplier||'').toLowerCase().includes(filters.supplier.toLowerCase())) return false;
   if(filters.search){
@@ -600,14 +601,14 @@ function orderedByCanonicalLabels(){
 function renderFilterCardRow(labelText, dim, options){
   const counts = facetCounts(dim);
   const totalCount = state.poLines.filter(r=>matchesFilters(r, state.filters, dim)).length;
-  const activeVal = state.filters[dim];
+  const activeVals = state.filters[dim];
   const visibleOptions = options.filter(o=>(counts.get(o.value)||0) > 0);
   return `
     <div class="filter-row">
       <div class="filter-row-label">${labelText}</div>
       <div class="filter-cards">
-        <button type="button" class="filter-card ${!activeVal?'active':''}" data-dim="${dim}" data-value="">All <span class="count">${totalCount}</span></button>
-        ${visibleOptions.map(o=>`<button type="button" class="filter-card ${activeVal===o.value?'active':''}" data-dim="${dim}" data-value="${o.value}">${o.label} <span class="count">${counts.get(o.value)||0}</span></button>`).join('')}
+        <button type="button" class="filter-card ${!activeVals.length?'active':''}" data-dim="${dim}" data-value="">All <span class="count">${totalCount}</span></button>
+        ${visibleOptions.map(o=>`<button type="button" class="filter-card ${activeVals.includes(o.value)?'active':''}" data-dim="${dim}" data-value="${o.value}">${o.label} <span class="count">${counts.get(o.value)||0}</span></button>`).join('')}
       </div>
     </div>
   `;
@@ -708,42 +709,13 @@ function renderOpenTable(){
 }
 
 // ============================================================
-// BLANKS
-// ============================================================
-function renderBlanks(){
-  const rows = state.poLines.filter(r=>r.is_active && !r.promise_date).sort((a,b)=> new Date(a.order_date||0) - new Date(b.order_date||0));
-  return `
-    <div class="panel">
-      <p style="color:var(--muted);font-size:13px;margin-top:0;">Open POs with no Promise Date. Flagged if it's been ${BLANK_PAST_BUFFER_DAYS}+ days since the Order Date.</p>
-      <table>
-        <thead><tr><th>Store</th><th>Supplier</th><th>PO Number</th><th>Style / Color</th><th>Ordered By</th><th>Order Date</th><th>Reference #</th><th>Flag</th></tr></thead>
-        <tbody>
-          ${rows.length ? rows.map(r=>`
-            <tr class="po-row" data-po="${r.po_number}">
-              <td>${r.store ?? '—'}</td>
-              <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
-              <td>${r.po_number}</td>
-              <td class="td-truncate" title="${escapeAttr((r.style_name||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
-              <td>${r.ordered_by || '—'}</td>
-              <td>${fmtDate(r.order_date)}</td>
-              <td>${r.reference_number || ''}</td>
-              <td>${isBlankPast(r) ? '<span class="badge b28">past buffer</span>' : ''}</td>
-            </tr>
-          `).join('') : `<tr><td colspan="8" class="empty">No blank-promise-date POs.</td></tr>`}
-        </tbody>
-      </table>
-    </div>
-  `;
-}
-
-// ============================================================
 // LARGE ORDERS
 // ============================================================
 function matchesLargeFilters(r, filters, excludeDim){
   if(filters.activeOnly && !r.is_active) return false;
   if(Number(r.amount_ordered) < filters.threshold) return false;
-  if(excludeDim!=='store' && filters.store && String(r.store) !== filters.store) return false;
-  if(excludeDim!=='productCode' && filters.productCode && r.product_code !== filters.productCode) return false;
+  if(excludeDim!=='store' && filters.store.length && !filters.store.includes(String(r.store))) return false;
+  if(excludeDim!=='productCode' && filters.productCode.length && !filters.productCode.includes(r.product_code)) return false;
   if(filters.etaMode === 'specific'){
     if(filters.etaDate && r.promise_date !== filters.etaDate) return false;
   } else {
@@ -768,14 +740,14 @@ function largeFacetCounts(dim){
 function renderLargeFilterCardRow(labelText, dim, options){
   const counts = largeFacetCounts(dim);
   const totalCount = state.poLines.filter(r=>matchesLargeFilters(r, state.largeFilters, dim)).length;
-  const activeVal = state.largeFilters[dim];
+  const activeVals = state.largeFilters[dim];
   const visibleOptions = options.filter(o=>(counts.get(o.value)||0) > 0);
   return `
     <div class="filter-row">
       <div class="filter-row-label">${labelText}</div>
       <div class="filter-cards">
-        <button type="button" class="filter-card large-filter-card ${!activeVal?'active':''}" data-dim="${dim}" data-value="">All <span class="count">${totalCount}</span></button>
-        ${visibleOptions.map(o=>`<button type="button" class="filter-card large-filter-card ${activeVal===o.value?'active':''}" data-dim="${dim}" data-value="${o.value}">${o.label} <span class="count">${counts.get(o.value)||0}</span></button>`).join('')}
+        <button type="button" class="filter-card large-filter-card ${!activeVals.length?'active':''}" data-dim="${dim}" data-value="">All <span class="count">${totalCount}</span></button>
+        ${visibleOptions.map(o=>`<button type="button" class="filter-card large-filter-card ${activeVals.includes(o.value)?'active':''}" data-dim="${dim}" data-value="${o.value}">${o.label} <span class="count">${counts.get(o.value)||0}</span></button>`).join('')}
       </div>
     </div>
   `;
@@ -1286,7 +1258,7 @@ function attachViewHandlers(){
   if(state.view === 'large'){
     document.querySelectorAll('.large-filter-card').forEach(btn=>{
       btn.addEventListener('click', ()=>{
-        state.largeFilters[btn.dataset.dim] = btn.dataset.value;
+        toggleFilterValue(state.largeFilters, btn.dataset.dim, btn.dataset.value);
         render();
       });
     });
@@ -1334,12 +1306,12 @@ function attachViewHandlers(){
       render();
     });
     document.getElementById('clearAllFiltersBtn')?.addEventListener('click', ()=>{
-      state.filters = { orderedBy: '', store: '', supplier: '', vendor: '', bucket: '', worked: '', search: '', activeOnly: false, purchasingOnly: false, receivedStatus: '' };
+      state.filters = { orderedBy: [], store: [], supplier: '', vendor: [], bucket: [], worked: [], search: '', activeOnly: false, purchasingOnly: false, receivedStatus: '' };
       render();
     });
     document.querySelectorAll('.filter-card').forEach(btn=>{
       btn.addEventListener('click', ()=>{
-        state.filters[btn.dataset.dim] = btn.dataset.value;
+        toggleFilterValue(state.filters, btn.dataset.dim, btn.dataset.value);
         render();
       });
     });
@@ -1395,7 +1367,7 @@ function exportCsv(){
 // Allows deep-linking straight to a tab, e.g. ?view=large from the Purchasing Portal.
 (function(){
   const requestedView = new URLSearchParams(window.location.search).get('view');
-  if(['rollup','open','large','blanks'].includes(requestedView)){
+  if(['rollup','open','large'].includes(requestedView)){
     state.view = requestedView;
     document.querySelectorAll('#mainNav button[data-view]').forEach(b=>b.classList.toggle('active', b.dataset.view===requestedView));
   }
