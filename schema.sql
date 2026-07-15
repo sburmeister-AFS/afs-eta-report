@@ -75,3 +75,16 @@ create index if not exists po_line_history_po_number_idx on public.po_line_histo
 alter table public.po_line_history enable row level security;
 create policy "anon read" on public.po_line_history for select using (true);
 create policy "anon insert" on public.po_line_history for insert with check (true);
+
+-- Singleton settings row (boolean PK that's always true, so only one row can ever exist).
+-- Admin-editable from the Upload tab; applied for every user, not just the admin who set it.
+create table if not exists public.app_settings (
+  id boolean primary key default true check (id),
+  date_buffer_days integer not null default 0, -- hides All Open POs rows past-due within this many business days
+  updated_at timestamptz not null default now()
+);
+insert into public.app_settings (id, date_buffer_days) values (true, 0) on conflict (id) do nothing;
+
+alter table public.app_settings enable row level security;
+create policy "anon read" on public.app_settings for select using (true);
+create policy "anon update" on public.app_settings for update using (true) with check (true);

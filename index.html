@@ -202,7 +202,8 @@ const state = {
   sort: { col: 'past_days', dir: 'desc' },
   showCost: false,
   largeFilters: { store: [], productCode: [], threshold: 10000, activeOnly: true, etaMode: 'range', etaDate: '', etaFrom: '', etaTo: '', poSearch: '' },
-  largeSort: { col: 'amount_ordered', dir: 'desc' }
+  largeSort: { col: 'amount_ordered', dir: 'desc' },
+  dateBufferDays: 0 // admin-set, global: hides All Open POs rows past-due within this many business days
 };
 
 // ---------- identity ("who's using this" - a name-select for audit attribution, not a real login) ----------
@@ -236,6 +237,25 @@ function parseDateStr(s){ if(!s) return null; const d = new Date(s + 'T00:00:00'
 function daysBetween(a,b){ return Math.round((a - b) / 86400000); }
 function toDateStr(d){ return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
 function mondayOfWeek(d){ const monday = new Date(d); monday.setDate(d.getDate() - ((d.getDay()+6)%7)); return monday; }
+
+// Weekday count strictly after promise_date, up through today (Mon-Fri only, no holiday
+// awareness). null if not past due (blank or future promise date) - the date buffer only ever
+// hides rows that are actually overdue.
+function businessDaysPast(row){
+  if(!row.promise_date) return null;
+  const pd = parseDateStr(row.promise_date);
+  if(!pd) return null;
+  const today = todayLocalMidnight();
+  if(pd > today) return null;
+  let count = 0;
+  const d = new Date(pd);
+  while(d.getTime() < today.getTime()){
+    d.setDate(d.getDate() + 1);
+    const day = d.getDay();
+    if(day !== 0 && day !== 6) count++;
+  }
+  return count;
+}
 
 // Presets for the Large Orders ETA filter: business week runs Monday-Saturday.
 function etaPresetRanges(){
@@ -297,11 +317,22 @@ async function loadLastBatch(){
   return (data && data[0]) || null;
 }
 
+async function loadDateBufferDays(){
+  const { data, error } = await sb.from('app_settings').select('date_buffer_days').eq('id', true).single();
+  if(error){ console.error(error); return 0; }
+  return (data && data.date_buffer_days) || 0;
+}
+async function saveDateBufferDays(days){
+  const { error } = await sb.from('app_settings').update({ date_buffer_days: days, updated_at: new Date().toISOString() }).eq('id', true);
+  if(error) throw error;
+}
+
 async function refreshData(){
   document.getElementById('lastUpdated').textContent = 'Loading…';
-  const [lines, batch] = await Promise.all([loadAll(), loadLastBatch()]);
+  const [lines, batch, bufferDays] = await Promise.all([loadAll(), loadLastBatch(), loadDateBufferDays()]);
   state.poLines = lines;
   state.lastBatch = batch;
+  state.dateBufferDays = bufferDays;
   state.loadedAt = new Date();
   document.getElementById('lastUpdated').textContent = batch
     ? `Last upload: ${new Date(batch.uploaded_at).toLocaleString()} · ${batch.row_count} open POs`
@@ -575,6 +606,10 @@ function matchesFilters(r, filters, excludeDim){
   if(excludeDim!=='worked' && filters.worked.length && !filters.worked.includes(String(!!r.worked))) return false;
   if(excludeDim!=='vendor' && filters.vendor.length && !filters.vendor.includes(r.supplier)) return false;
   if(filters.receivedStatus && receivedStatusOf(r) !== filters.receivedStatus) return false;
+  if(state.dateBufferDays > 0){
+    const bd = businessDaysPast(r);
+    if(bd !== null && bd < state.dateBufferDays) return false;
+  }
   if(filters.supplier && !(r.supplier||'').toLowerCase().includes(filters.supplier.toLowerCase())) return false;
   if(filters.search){
     const s = filters.search.toLowerCase();
@@ -901,6 +936,17 @@ function renderUpload(){
         Drag & drop the received-qty CSV here, or click to choose a file
       </div>
     </div>
+    <div class="panel">
+      <h2 style="margin-top:0;">Settings</h2>
+      <p style="color:var(--muted);font-size:13px;">Date Buffer: hides a PO from All Open POs while it's still within this many business days (Mon-Fri) of going past due, so buyers aren't chasing something that just barely missed its promise date. Applies for everyone, not just admins. 0 = off.</p>
+      <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:6px;">Date Buffer (business days)</label>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input type="text" inputmode="numeric" pattern="[0-9]*" id="dateBufferInput" value="${state.dateBufferDays}" style="width:100px;padding:8px 10px;border:1px solid var(--border);border-radius:7px;">
+        <button class="btn" id="saveDateBufferBtn">Save</button>
+        <span id="dateBufferSavedMsg" class="hidden" style="color:var(--good);font-size:12.5px;">Saved.</span>
+        <span id="dateBufferError" class="pw-error hidden"></span>
+      </div>
+    </div>
   `;
 }
 
@@ -923,6 +969,26 @@ function attachUploadHandlers(){
     ['dragleave','drop'].forEach(ev=>rdz.addEventListener(ev, (e)=>{ e.preventDefault(); rdz.classList.remove('drag'); }));
     rdz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f) handleReceivedFile(f); });
   }
+  document.getElementById('saveDateBufferBtn')?.addEventListener('click', async ()=>{
+    const raw = parseInt(document.getElementById('dateBufferInput').value, 10);
+    const days = (isNaN(raw) || raw < 0) ? 0 : raw;
+    const btn = document.getElementById('saveDateBufferBtn');
+    const errBox = document.getElementById('dateBufferError');
+    const savedMsg = document.getElementById('dateBufferSavedMsg');
+    errBox.classList.add('hidden');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try{
+      await saveDateBufferDays(days);
+      state.dateBufferDays = days;
+      btn.disabled = false; btn.textContent = 'Save';
+      savedMsg.classList.remove('hidden');
+      setTimeout(()=>savedMsg.classList.add('hidden'), 2000);
+    } catch(err){
+      btn.disabled = false; btn.textContent = 'Save';
+      errBox.textContent = 'Error saving: ' + err.message;
+      errBox.classList.remove('hidden');
+    }
+  });
 }
 
 function showProgress(text, pct){
