@@ -569,19 +569,22 @@ function isPurchasingAssociate(orderedBy){
 // 'none': nothing received yet. 'partial': some received, less than ordered. 'full': received
 // meets or exceeds ordered (received can legitimately exceed ordered - it's cumulative across
 // reorders on the same PO suffix, per the received-qty report).
+// Amount Ordered (from the PO Listing report) is the REMAINING balance - RFMS decrements it
+// as a PO gets received, it isn't a fixed original total. So as long as there's still a
+// remaining balance (ordered > 0), the PO is partially received, no matter how large the
+// all-time received count is (that count can span multiple reorders on the same PO suffix).
+// Only once nothing remains (ordered <= 0) is it genuinely 'full'.
 function receivedStatusOf(row){
   const received = Number(row.amount_received) || 0;
   const ordered = Number(row.amount_ordered) || 0;
   if(received <= 0) return 'none';
-  if(ordered > 0 && received < ordered) return 'partial';
+  if(ordered > 0) return 'partial';
   return 'full';
 }
 
-// RFMS decrements Amount Ordered as a PO is partially received, so that field ends up holding
-// what's still outstanding rather than the original order quantity - add back what's already
-// been received to show the true total. Skip this for 'full' rows: there, received is
-// cumulative across reorders on the same PO suffix, not a simple balance against this specific
-// order, so adding it to Amount Ordered wouldn't produce a meaningful total.
+// Reconstructs the true original order quantity: remaining balance + what's already been
+// received. Only meaningful while something is still outstanding ('partial'); once a PO is
+// 'full' there's nothing remaining to add back, so just show Amount Ordered as-is.
 function displayOrderedQty(row){
   const ordered = Number(row.amount_ordered) || 0;
   const received = Number(row.amount_received) || 0;
