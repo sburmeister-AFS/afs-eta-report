@@ -196,6 +196,7 @@ const state = {
   view: 'rollup',
   rollupMetric: 'dollars',   // 'dollars' | 'count'
   rollupGroupBy: 'ordered_by', // 'ordered_by' | 'store'
+  rollupScope: 'all', // 'all' | 'purchasing' - purchasing scopes the scorecard + table to just the 10-person roster
   // orderedBy/store/vendor/bucket/worked are multiselect: an array of selected values,
   // empty array = "All" (no filter on that dimension).
   filters: { orderedBy: [], store: [], supplier: '', vendor: [], bucket: [], worked: ['false'], search: '', activeOnly: true, purchasingOnly: false, receivedStatus: '' },
@@ -469,7 +470,8 @@ function renderScorecard(totals, totalAll, goals){
 // MANAGER ROLLUP
 // ============================================================
 function renderRollup(){
-  const active = state.poLines.filter(r=>r.is_active);
+  let active = state.poLines.filter(r=>r.is_active);
+  if(state.rollupScope === 'purchasing') active = active.filter(r=>isPurchasingAssociate(r.ordered_by));
   const groupField = state.rollupGroupBy === 'store' ? 'store' : 'ordered_by';
   const groups = new Map();
   for(const row of active){
@@ -518,6 +520,11 @@ function renderRollup(){
         <div class="toggle-group" id="groupToggle">
           <button data-group="ordered_by" class="${state.rollupGroupBy==='ordered_by'?'active':''}">Ordered By</button>
           <button data-group="store" class="${state.rollupGroupBy==='store'?'active':''}">Store</button>
+        </div>
+        <span style="font-weight:700;margin-left:16px;">Scope:</span>
+        <div class="toggle-group" id="scopeToggle">
+          <button data-scope="all" class="${state.rollupScope==='all'?'active':''}">All POs</button>
+          <button data-scope="purchasing" class="${state.rollupScope==='purchasing'?'active':''}">Purchasing Associates</button>
         </div>
       </div>
       <table>
@@ -1396,6 +1403,10 @@ function attachViewHandlers(){
     document.getElementById('groupToggle')?.addEventListener('click', (e)=>{
       const b = e.target.closest('button[data-group]'); if(!b) return;
       state.rollupGroupBy = b.dataset.group; render();
+    });
+    document.getElementById('scopeToggle')?.addEventListener('click', (e)=>{
+      const b = e.target.closest('button[data-scope]'); if(!b) return;
+      state.rollupScope = b.dataset.scope; render();
     });
   }
 
