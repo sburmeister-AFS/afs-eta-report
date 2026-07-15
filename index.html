@@ -1450,7 +1450,7 @@ function attachViewHandlers(){
       render();
     });
     document.getElementById('clearAllFiltersBtn')?.addEventListener('click', ()=>{
-      state.filters = { orderedBy: [], store: [], supplier: '', vendor: [], bucket: [], worked: [], search: '', activeOnly: false, purchasingOnly: false, receivedStatus: '' };
+      state.filters = { orderedBy: [], store: [], supplier: '', vendor: [], bucket: [], worked: [], search: '', activeOnly: true, purchasingOnly: false, receivedStatus: '' };
       render();
     });
     document.querySelectorAll('.filter-card').forEach(btn=>{
