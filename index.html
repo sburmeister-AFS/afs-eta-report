@@ -931,19 +931,19 @@ function renderUpload(){
   if(!state.isAdmin) return `<div class="panel"><p class="empty">Admin login required.</p></div>`;
   return `
     <div class="panel">
-      <h2 style="margin-top:0;">Upload eta_TBD.CSV</h2>
+      <h2 style="margin-top:0;">Upload Purchase Order Listing Report</h2>
       <p style="color:var(--muted);font-size:13px;">Drop the raw export below. The app filters to <code>Status = Open</code> automatically — no need to pre-clean it.</p>
       <div class="dropzone" id="dropzone">
         <input type="file" id="fileInput" accept=".csv" class="hidden">
-        Drag & drop eta_TBD.CSV here, or click to choose a file
+        Drag & drop the Purchase Order Listing Report here, or click to choose a file
       </div>
     </div>
     <div class="panel">
-      <h2 style="margin-top:0;">Upload Received Qty Report</h2>
+      <h2 style="margin-top:0;">Upload PO Summary Report</h2>
       <p style="color:var(--muted);font-size:13px;">Drop the separate RFMS export that includes an <code>Amount Received</code> column. This only updates received quantities on POs that already exist here — it won't open, close, or otherwise change any PO.</p>
       <div class="dropzone" id="receivedDropzone">
         <input type="file" id="receivedFileInput" accept=".csv" class="hidden">
-        Drag & drop the received-qty CSV here, or click to choose a file
+        Drag & drop the PO Summary Report here, or click to choose a file
       </div>
     </div>
     <div class="panel">
