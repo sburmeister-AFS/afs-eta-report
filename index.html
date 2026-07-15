@@ -193,7 +193,7 @@ const state = {
   view: 'rollup',
   rollupMetric: 'dollars',   // 'dollars' | 'count'
   rollupGroupBy: 'ordered_by', // 'ordered_by' | 'store'
-  filters: { orderedBy: '', store: '', supplier: '', vendor: '', bucket: '', worked: 'false', search: '', activeOnly: true, purchasingOnly: false },
+  filters: { orderedBy: '', store: '', supplier: '', vendor: '', bucket: '', worked: 'false', search: '', activeOnly: true, purchasingOnly: false, receivedStatus: '' },
   sort: { col: 'past_days', dir: 'desc' },
   showCost: false,
   largeFilters: { store: '', productCode: '', threshold: 10000, activeOnly: true, etaMode: 'range', etaDate: '', etaFrom: '', etaTo: '', poSearch: '' },
@@ -512,6 +512,17 @@ function isPurchasingAssociate(orderedBy){
   return PURCHASING_ASSOCIATE_KEYS.some(assocKey => key.includes(assocKey) || assocKey.includes(key));
 }
 
+// 'none': nothing received yet. 'partial': some received, less than ordered. 'full': received
+// meets or exceeds ordered (received can legitimately exceed ordered - it's cumulative across
+// reorders on the same PO suffix, per the received-qty report).
+function receivedStatusOf(row){
+  const received = Number(row.amount_received) || 0;
+  const ordered = Number(row.amount_ordered) || 0;
+  if(received <= 0) return 'none';
+  if(ordered > 0 && received < ordered) return 'partial';
+  return 'full';
+}
+
 function matchesFilters(r, filters, excludeDim){
   if(filters.activeOnly && !r.is_active) return false;
   if(filters.purchasingOnly && !isPurchasingAssociate(r.ordered_by)) return false;
@@ -520,6 +531,7 @@ function matchesFilters(r, filters, excludeDim){
   if(excludeDim!=='bucket' && filters.bucket && bucketOf(r) !== filters.bucket) return false;
   if(excludeDim!=='worked' && filters.worked && String(!!r.worked) !== filters.worked) return false;
   if(excludeDim!=='vendor' && filters.vendor && r.supplier !== filters.vendor) return false;
+  if(filters.receivedStatus && receivedStatusOf(r) !== filters.receivedStatus) return false;
   if(filters.supplier && !(r.supplier||'').toLowerCase().includes(filters.supplier.toLowerCase())) return false;
   if(filters.search){
     const s = filters.search.toLowerCase();
@@ -632,7 +644,15 @@ function renderOpenTable(){
 
   return `
     <div class="panel">
-      <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:10px;">
+        <div>
+          <span style="font-weight:700;font-size:12.5px;margin-right:8px;">Received:</span>
+          <div class="toggle-group" id="receivedStatusToggle" style="display:inline-flex;">
+            <button type="button" data-received="" class="${!state.filters.receivedStatus?'active':''}">All</button>
+            <button type="button" data-received="partial" class="${state.filters.receivedStatus==='partial'?'active':''}">Partially Received</button>
+            <button type="button" data-received="none" class="${state.filters.receivedStatus==='none'?'active':''}">No Qty Received</button>
+          </div>
+        </div>
         <button type="button" class="btn secondary" id="clearAllFiltersBtn">Clear all filters</button>
       </div>
       ${renderFilterCardRow('Ordered By', 'orderedBy', orderedByOptions)}
@@ -673,7 +693,7 @@ function renderOpenTable(){
               <td>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
               <td>${r.reference_number || ''}</td>
               <td class="td-truncate" title="${escapeAttr((r.style_name||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
-              <td>${r.amount_ordered!=null ? Number(r.amount_ordered).toLocaleString() : '—'} ${r.units||''}</td>
+              <td>${r.amount_ordered!=null ? Number(r.amount_ordered).toLocaleString() : '—'} ${r.units||''}${receivedStatusOf(r)!=='none' ? ` <span class="badge ${receivedStatusOf(r)==='full'?'current':'b7'}" title="Amount Received">${Number(r.amount_received).toLocaleString()} recv</span>` : ''}</td>
               <td>${r.ordered_by || '—'}</td>
               <td>${fmtDate(r.order_date)}</td>
               <td class="promise-cell" data-po="${r.po_number}" title="Click to update the promise date">${fmtDate(r.promise_date)}${r.pending_promise_date ? ` <span class="badge b7 pending-flag" title="Unverified proposed date: ${fmtDate(r.pending_promise_date)} — not yet confirmed in RFMS">? ${fmtDate(r.pending_promise_date)}</span>` : ''}</td>
@@ -859,18 +879,36 @@ function renderUpload(){
         Drag & drop eta_TBD.CSV here, or click to choose a file
       </div>
     </div>
+    <div class="panel">
+      <h2 style="margin-top:0;">Upload Received Qty Report</h2>
+      <p style="color:var(--muted);font-size:13px;">Drop the separate RFMS export that includes an <code>Amount Received</code> column. This only updates received quantities on POs that already exist here — it won't open, close, or otherwise change any PO.</p>
+      <div class="dropzone" id="receivedDropzone">
+        <input type="file" id="receivedFileInput" accept=".csv" class="hidden">
+        Drag & drop the received-qty CSV here, or click to choose a file
+      </div>
+    </div>
   `;
 }
 
 function attachUploadHandlers(){
   const dz = document.getElementById('dropzone');
-  if(!dz) return;
-  const fileInput = document.getElementById('fileInput');
-  dz.addEventListener('click', ()=>fileInput.click());
-  fileInput.addEventListener('change', (e)=>{ if(e.target.files[0]) handleFile(e.target.files[0]); });
-  ['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev, (e)=>{ e.preventDefault(); dz.classList.add('drag'); }));
-  ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev, (e)=>{ e.preventDefault(); dz.classList.remove('drag'); }));
-  dz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f) handleFile(f); });
+  if(dz){
+    const fileInput = document.getElementById('fileInput');
+    dz.addEventListener('click', ()=>fileInput.click());
+    fileInput.addEventListener('change', (e)=>{ if(e.target.files[0]) handleFile(e.target.files[0]); });
+    ['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev, (e)=>{ e.preventDefault(); dz.classList.add('drag'); }));
+    ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev, (e)=>{ e.preventDefault(); dz.classList.remove('drag'); }));
+    dz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f) handleFile(f); });
+  }
+  const rdz = document.getElementById('receivedDropzone');
+  if(rdz){
+    const receivedFileInput = document.getElementById('receivedFileInput');
+    rdz.addEventListener('click', ()=>receivedFileInput.click());
+    receivedFileInput.addEventListener('change', (e)=>{ if(e.target.files[0]) handleReceivedFile(e.target.files[0]); });
+    ['dragenter','dragover'].forEach(ev=>rdz.addEventListener(ev, (e)=>{ e.preventDefault(); rdz.classList.add('drag'); }));
+    ['dragleave','drop'].forEach(ev=>rdz.addEventListener(ev, (e)=>{ e.preventDefault(); rdz.classList.remove('drag'); }));
+    rdz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f) handleReceivedFile(f); });
+  }
 }
 
 function showProgress(text, pct){
@@ -1036,6 +1074,57 @@ async function processUpload(openRowsRaw, filename){
   showProgress('Done. Refreshing…', 100);
   await refreshData();
   setTimeout(hideProgress, 1500);
+}
+
+// ============================================================
+// RECEIVED QTY REPORT (separate file - only touches amount_received)
+// ============================================================
+async function handleReceivedFile(file){
+  showProgress('Parsing received-qty report…', 5);
+  const rows = [];
+  Papa.parse(file, {
+    header: true,
+    skipEmptyLines: true,
+    worker: true,
+    step: (results)=>{
+      const r = results.data;
+      const po = (r['PO Number']||'').trim();
+      if(!po) return;
+      const received = parseFloat(r['Amount Received']);
+      if(isNaN(received)) return;
+      rows.push({ po_number: po, amount_received: received });
+    },
+    complete: ()=>{ processReceivedUpload(rows).catch(err=>{
+      console.error(err);
+      showProgress('Error: ' + err.message);
+      setTimeout(hideProgress, 4000);
+    }); },
+    error: (err)=>{ showProgress('Parse error: ' + err.message); setTimeout(hideProgress, 4000); }
+  });
+}
+
+async function processReceivedUpload(rows){
+  showProgress(`Parsed ${rows.length.toLocaleString()} rows. Matching to existing POs…`, 10);
+  const existingPoSet = new Set(state.poLines.map(r=>r.po_number));
+  const byPo = new Map();
+  rows.forEach(r=>byPo.set(r.po_number, r.amount_received)); // last one wins if dup within file
+  const toUpdate = Array.from(byPo.entries()).filter(([po])=>existingPoSet.has(po));
+  const skipped = byPo.size - toUpdate.length;
+
+  const CONCURRENCY = 20;
+  let done = 0;
+  for(let i=0; i<toUpdate.length; i+=CONCURRENCY){
+    const batch = toUpdate.slice(i, i+CONCURRENCY);
+    await Promise.all(batch.map(([po, amt])=>
+      sb.from('po_lines').update({ amount_received: amt }).eq('po_number', po)
+    ));
+    done += batch.length;
+    showProgress(`Updating PO lines… ${done.toLocaleString()} / ${toUpdate.length.toLocaleString()}`, 10 + (done/Math.max(toUpdate.length,1))*80);
+  }
+
+  showProgress(`Done. ${toUpdate.length.toLocaleString()} updated${skipped ? `, ${skipped.toLocaleString()} skipped (PO not found)` : ''}. Refreshing…`, 95);
+  await refreshData();
+  setTimeout(hideProgress, 2500);
 }
 
 // ============================================================
@@ -1239,8 +1328,13 @@ function attachViewHandlers(){
   }
 
   if(state.view === 'open'){
+    document.getElementById('receivedStatusToggle')?.addEventListener('click', (e)=>{
+      const b = e.target.closest('button[data-received]'); if(!b) return;
+      state.filters.receivedStatus = b.dataset.received;
+      render();
+    });
     document.getElementById('clearAllFiltersBtn')?.addEventListener('click', ()=>{
-      state.filters = { orderedBy: '', store: '', supplier: '', vendor: '', bucket: '', worked: '', search: '', activeOnly: false, purchasingOnly: false };
+      state.filters = { orderedBy: '', store: '', supplier: '', vendor: '', bucket: '', worked: '', search: '', activeOnly: false, purchasingOnly: false, receivedStatus: '' };
       render();
     });
     document.querySelectorAll('.filter-card').forEach(btn=>{

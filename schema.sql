@@ -23,6 +23,7 @@ create table if not exists public.po_lines (
   sidemark text,
   amount_ordered numeric,
   units text,
+  amount_received numeric, -- from the separate "received qty" RFMS report, matched by po_number; not in the regular eta_TBD.CSV upload
   promise_date date,
   order_date date,
   status text,
@@ -42,6 +43,9 @@ create table if not exists public.po_lines (
   worked boolean not null default false, -- buyer has worked this PO from the All Open POs page
   worked_at timestamptz
 );
+
+-- Safe to re-run against an existing database that predates the amount_received column.
+alter table public.po_lines add column if not exists amount_received numeric;
 
 create index if not exists po_lines_ordered_by_idx on public.po_lines (ordered_by);
 create index if not exists po_lines_store_idx on public.po_lines (store);
