@@ -631,6 +631,9 @@ function renderOpenTable(){
 
   return `
     <div class="panel">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+        <button type="button" class="btn secondary" id="clearAllFiltersBtn">Clear all filters</button>
+      </div>
       ${renderFilterCardRow('Ordered By', 'orderedBy', orderedByOptions)}
       ${renderFilterCardRow('Store', 'store', storeOptions)}
       ${renderFilterCardRow('Vendor', 'vendor', vendorOptions)}
@@ -1232,6 +1235,10 @@ function attachViewHandlers(){
   }
 
   if(state.view === 'open'){
+    document.getElementById('clearAllFiltersBtn')?.addEventListener('click', ()=>{
+      state.filters = { orderedBy: '', store: '', supplier: '', vendor: '', bucket: '', worked: '', search: '', activeOnly: false, purchasingOnly: false };
+      render();
+    });
     document.querySelectorAll('.filter-card').forEach(btn=>{
       btn.addEventListener('click', ()=>{
         state.filters[btn.dataset.dim] = btn.dataset.value;
