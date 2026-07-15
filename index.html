@@ -108,6 +108,10 @@
     <button data-view="large">Large Orders</button>
     <button data-view="upload" id="uploadTabBtn" class="hidden">Upload</button>
   </nav>
+  <div id="identityBox" class="hidden" style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);">
+    <span>👤 <strong id="currentUserLabel"></strong></span>
+    <button type="button" id="switchUserBtn" class="btn secondary" style="padding:4px 8px;font-size:11.5px;">Switch</button>
+  </div>
   <button id="adminBtn">🔒 Admin</button>
 </header>
 
@@ -188,6 +192,7 @@ const state = {
   loadedAt: null,
   lastBatch: null,
   isAdmin: false,
+  currentUser: null,
   view: 'rollup',
   rollupMetric: 'dollars',   // 'dollars' | 'count'
   rollupGroupBy: 'ordered_by', // 'ordered_by' | 'store'
@@ -199,6 +204,31 @@ const state = {
   largeFilters: { store: [], productCode: [], threshold: 10000, activeOnly: true, etaMode: 'range', etaDate: '', etaFrom: '', etaTo: '', poSearch: '' },
   largeSort: { col: 'amount_ordered', dir: 'desc' }
 };
+
+// ---------- identity ("who's using this" - a name-select for audit attribution, not a real login) ----------
+const IDENTITY_STORAGE_KEY = 'etaReportIdentity';
+function getStoredIdentity(){ return localStorage.getItem(IDENTITY_STORAGE_KEY) || null; }
+function setStoredIdentity(name){ localStorage.setItem(IDENTITY_STORAGE_KEY, name); }
+function clearStoredIdentity(){ localStorage.removeItem(IDENTITY_STORAGE_KEY); }
+
+function renderIdentityGate(){
+  document.getElementById('identityBox').classList.add('hidden');
+  document.getElementById('app').innerHTML = `
+    <div class="panel" style="max-width:420px;margin:60px auto;text-align:center;">
+      <h2 style="margin-top:0;">Who's using the ETA Report?</h2>
+      <p style="color:var(--muted);font-size:13px;">Pick your name so the actions you take get recorded correctly.</p>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:18px;">
+        ${PURCHASING_ASSOCIATE_NAMES.map(n=>`<button type="button" class="btn secondary identity-pick-btn" data-name="${escapeAttr(n)}">${n}</button>`).join('')}
+      </div>
+    </div>
+  `;
+  document.querySelectorAll('.identity-pick-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      setStoredIdentity(btn.dataset.name);
+      boot();
+    });
+  });
+}
 
 // ---------- date / bucket helpers ----------
 function todayLocalMidnight(){ const d = new Date(); d.setHours(0,0,0,0); return d; }
@@ -491,13 +521,14 @@ function renderRollup(){
 // spellings of the same person aggregate into one filter card instead of three.
 function nameKey(name){ return (name||'').toUpperCase().replace(/[^A-Z0-9]/g,''); }
 
-// Purchasing team roster for the "Purchasing Associates Only" filter. Ordered By values in
-// the data are inconsistent (full name vs. last-name-only vs. truncated, e.g. "Devan
-// Stonebraker" shows up as "DEVAN.STONEBRAK") so this matches on nameKey substring in either
-// direction rather than requiring an exact match.
-const PURCHASING_ASSOCIATE_KEYS = ['Alani Copas','Chris Rose','Devan Stonebraker','Aundrea Wells',
-  'Marissa Devore','Dave Levisay','Scott Burmeister','Todd Gies','Jude Hoferkamp','Mikel Hartman'
-].map(nameKey);
+// Purchasing team roster - used both for the "Purchasing Associates Only" filter and as the
+// list of names in the "who's using this" identity picker (see IDENTITY section below).
+const PURCHASING_ASSOCIATE_NAMES = ['Alani Copas','Chris Rose','Devan Stonebraker','Aundrea Wells',
+  'Marissa Devore','Dave Levisay','Scott Burmeister','Todd Gies','Jude Hoferkamp','Mikel Hartman'];
+// Ordered By values in the data are inconsistent (full name vs. last-name-only vs. truncated,
+// e.g. "Devan Stonebraker" shows up as "DEVAN.STONEBRAK") so this matches on nameKey substring
+// in either direction rather than requiring an exact match.
+const PURCHASING_ASSOCIATE_KEYS = PURCHASING_ASSOCIATE_NAMES.map(nameKey);
 function isPurchasingAssociate(orderedBy){
   const key = nameKey(orderedBy);
   if(!key) return false;
@@ -1009,7 +1040,7 @@ async function processUpload(openRowsRaw, filename){
     const prev = existingByPo.get(row.po_number);
     if(!prev){
       upserts.push({ ...row, first_seen_batch_id: batchId, first_seen_at: nowIso, last_seen_batch_id: batchId, last_seen_at: nowIso, is_active: true });
-      historyEvents.push({ po_number: row.po_number, batch_id: batchId, event_type: 'created', changes: null, detected_at: nowIso });
+      historyEvents.push({ po_number: row.po_number, batch_id: batchId, event_type: 'created', changes: null, actor: state.currentUser, detected_at: nowIso });
     } else {
       const changes = [];
       FIELDS_TO_COMPARE.forEach(f=>{
@@ -1019,9 +1050,9 @@ async function processUpload(openRowsRaw, filename){
       const promiseDateChanged = changes.some(c=>c.field === 'promise_date');
       upserts.push({ ...row, first_seen_batch_id: prev.first_seen_batch_id, first_seen_at: prev.first_seen_at, last_seen_batch_id: batchId, last_seen_at: nowIso, is_active: true, ...(promiseDateChanged ? { pending_promise_date: null } : {}) });
       if(changes.length){
-        historyEvents.push({ po_number: row.po_number, batch_id: batchId, event_type: wasInactive ? 'reappeared' : 'updated', changes, detected_at: nowIso });
+        historyEvents.push({ po_number: row.po_number, batch_id: batchId, event_type: wasInactive ? 'reappeared' : 'updated', changes, actor: state.currentUser, detected_at: nowIso });
       } else if(wasInactive){
-        historyEvents.push({ po_number: row.po_number, batch_id: batchId, event_type: 'reappeared', changes: null, detected_at: nowIso });
+        historyEvents.push({ po_number: row.po_number, batch_id: batchId, event_type: 'reappeared', changes: null, actor: state.currentUser, detected_at: nowIso });
       }
     }
   }
@@ -1030,7 +1061,7 @@ async function processUpload(openRowsRaw, filename){
   for(const prev of existing){
     if(prev.is_active && !seenPoSet.has(prev.po_number)){
       closedUpdates.push({ po_number: prev.po_number, is_active: false });
-      historyEvents.push({ po_number: prev.po_number, batch_id: batchId, event_type: 'closed', changes: null, detected_at: nowIso });
+      historyEvents.push({ po_number: prev.po_number, batch_id: batchId, event_type: 'closed', changes: null, actor: state.currentUser, detected_at: nowIso });
     }
   }
 
@@ -1130,10 +1161,10 @@ async function openHistoryModal(poNumber){
     else if(ev.event_type === 'unverified_update'){
       body = (ev.changes||[]).map(c=>`<div class="tl-diff"><span class="f">${c.field}:</span> ${c.old ?? '—'} → <strong>${c.new ?? '—'}</strong> <span style="color:var(--warn);">(unverified — not yet confirmed in RFMS)</span></div>`).join('');
     }
-    else if(ev.event_type === 'worked'){ body = 'Marked as worked.'; }
-    else if(ev.event_type === 'unworked'){ body = 'Unmarked as worked.'; }
+    else if(ev.event_type === 'worked'){ body = 'Marked as worked.' + (ev.changes && ev.changes.note ? `<div class="tl-diff"><span class="f">Note:</span> ${escapeAttr(ev.changes.note)}</div>` : ''); }
+    else if(ev.event_type === 'unworked'){ body = 'Unmarked as worked.' + (ev.changes && ev.changes.note ? `<div class="tl-diff"><span class="f">Note:</span> ${escapeAttr(ev.changes.note)}</div>` : ''); }
     return `<div class="tl-event">
-      <div class="tl-date">${new Date(ev.detected_at).toLocaleString()}</div>
+      <div class="tl-date">${new Date(ev.detected_at).toLocaleString()}${ev.actor ? ` · <span style="color:var(--accent);">${escapeAttr(ev.actor)}</span>` : ''}</div>
       <div class="tl-type">${ev.event_type}</div>
       ${body}
     </div>`;
@@ -1192,7 +1223,7 @@ async function savePromiseUpdate(poNumber){
       const { error } = await sb.from('po_lines').update({ promise_date: newDate, pending_promise_date: null }).eq('po_number', poNumber);
       if(error) throw error;
       if(!valuesEqual(oldDate, newDate)){
-        const { error: histErr } = await sb.from('po_line_history').insert({ po_number: poNumber, batch_id: null, event_type: 'manual_update', changes: [{ field: 'promise_date', old: oldDate, new: newDate }], detected_at: nowIso });
+        const { error: histErr } = await sb.from('po_line_history').insert({ po_number: poNumber, batch_id: null, event_type: 'manual_update', changes: [{ field: 'promise_date', old: oldDate, new: newDate }], actor: state.currentUser, detected_at: nowIso });
         if(histErr) throw histErr;
       }
       row.promise_date = newDate;
@@ -1200,7 +1231,7 @@ async function savePromiseUpdate(poNumber){
     } else {
       const { error } = await sb.from('po_lines').update({ pending_promise_date: newDate }).eq('po_number', poNumber);
       if(error) throw error;
-      const { error: histErr } = await sb.from('po_line_history').insert({ po_number: poNumber, batch_id: null, event_type: 'unverified_update', changes: [{ field: 'promise_date', old: row.promise_date, new: newDate }], detected_at: nowIso });
+      const { error: histErr } = await sb.from('po_line_history').insert({ po_number: poNumber, batch_id: null, event_type: 'unverified_update', changes: [{ field: 'promise_date', old: row.promise_date, new: newDate }], actor: state.currentUser, detected_at: nowIso });
       if(histErr) throw histErr;
       row.pending_promise_date = newDate;
     }
@@ -1214,23 +1245,56 @@ async function savePromiseUpdate(poNumber){
 }
 
 // ============================================================
-// Worked stage (checkbox on All Open POs)
+// Worked stage (checkbox on All Open POs) - clicking it opens a confirm modal with an
+// optional note instead of toggling immediately; the native checkbox change is prevented
+// until Confirm, and Cancel leaves it untouched.
 // ============================================================
-async function toggleWorked(poNumber, checked, checkboxEl){
+function openWorkedConfirmModal(poNumber, newValue){
   const row = state.poLines.find(r=>r.po_number === poNumber);
   if(!row) return;
+  showModal(`
+    <span class="close" id="modalClose">&times;</span>
+    <h2>${newValue ? 'Mark as Worked' : 'Unmark as Worked'}</h2>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:14px;">
+      <strong>${poNumber}</strong> · ${row.supplier || ''} · ${row.style_name || ''}${row.color_desc ? (' · '+row.color_desc) : ''}
+    </div>
+    <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;">Notes (optional)</label>
+    <textarea id="workedNoteInput" rows="3" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:7px;font-family:inherit;font-size:13px;margin-bottom:14px;resize:vertical;" placeholder="Add a note about this…" autofocus></textarea>
+    <div id="workedConfirmError" class="pw-error hidden"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn secondary" id="workedCancelBtn">Cancel</button>
+      <button class="btn" id="workedConfirmBtn">Confirm</button>
+    </div>
+  `);
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+  document.getElementById('workedCancelBtn').addEventListener('click', closeModal);
+  document.getElementById('workedConfirmBtn').addEventListener('click', ()=>confirmWorkedToggle(poNumber, newValue));
+}
+
+async function confirmWorkedToggle(poNumber, newValue){
+  const row = state.poLines.find(r=>r.po_number === poNumber);
+  if(!row) return;
+  const note = document.getElementById('workedNoteInput').value.trim();
+  const btn = document.getElementById('workedConfirmBtn');
+  const errBox = document.getElementById('workedConfirmError');
+  btn.disabled = true; btn.textContent = 'Saving…';
   const nowIso = new Date().toISOString();
   try{
-    const { error } = await sb.from('po_lines').update({ worked: checked, worked_at: checked ? nowIso : null }).eq('po_number', poNumber);
+    const { error } = await sb.from('po_lines').update({ worked: newValue, worked_at: newValue ? nowIso : null }).eq('po_number', poNumber);
     if(error) throw error;
-    const { error: histErr } = await sb.from('po_line_history').insert({ po_number: poNumber, batch_id: null, event_type: checked ? 'worked' : 'unworked', changes: null, detected_at: nowIso });
+    const { error: histErr } = await sb.from('po_line_history').insert({
+      po_number: poNumber, batch_id: null, event_type: newValue ? 'worked' : 'unworked',
+      changes: note ? { note } : null, actor: state.currentUser, detected_at: nowIso
+    });
     if(histErr) throw histErr;
-    row.worked = checked;
-    row.worked_at = checked ? nowIso : null;
+    row.worked = newValue;
+    row.worked_at = newValue ? nowIso : null;
+    closeModal();
     render();
   } catch(err){
-    checkboxEl.checked = !checked; // revert on failure
-    alert('Error updating worked status: ' + err.message);
+    errBox.textContent = 'Error saving: ' + err.message;
+    errBox.classList.remove('hidden');
+    btn.disabled = false; btn.textContent = 'Confirm';
   }
 }
 
@@ -1319,8 +1383,11 @@ function attachViewHandlers(){
       td.addEventListener('click', (e)=>{ e.stopPropagation(); openPromiseEditModal(td.dataset.po); });
     });
     document.querySelectorAll('.worked-checkbox').forEach(cb=>{
-      cb.addEventListener('click', (e)=>e.stopPropagation());
-      cb.addEventListener('change', (e)=>{ toggleWorked(cb.dataset.po, cb.checked, cb); });
+      cb.addEventListener('click', (e)=>{
+        e.stopPropagation();
+        e.preventDefault(); // don't let the box actually toggle until the modal is confirmed
+        openWorkedConfirmModal(cb.dataset.po, !cb.checked);
+      });
     });
     document.querySelectorAll('.copy-po-btn').forEach(btn=>{
       btn.addEventListener('click', (e)=>{
@@ -1373,10 +1440,30 @@ function exportCsv(){
   }
 })();
 
-refreshData().catch(err=>{
-  console.error(err);
-  document.getElementById('app').innerHTML = `<div class="panel"><p class="empty">Failed to load data: ${err.message}</p></div>`;
+document.getElementById('switchUserBtn').addEventListener('click', ()=>{
+  clearStoredIdentity();
+  state.currentUser = null;
+  state.poLines = [];
+  state.lastBatch = null;
+  document.getElementById('lastUpdated').textContent = '';
+  boot();
 });
+
+function boot(){
+  const identity = getStoredIdentity();
+  if(!identity){
+    renderIdentityGate();
+    return;
+  }
+  state.currentUser = identity;
+  document.getElementById('currentUserLabel').textContent = identity;
+  document.getElementById('identityBox').classList.remove('hidden');
+  refreshData().catch(err=>{
+    console.error(err);
+    document.getElementById('app').innerHTML = `<div class="panel"><p class="empty">Failed to load data: ${err.message}</p></div>`;
+  });
+}
+boot();
 </script>
 </body>
 </html>

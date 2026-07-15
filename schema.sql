@@ -63,8 +63,12 @@ create table if not exists public.po_line_history (
   batch_id bigint references public.report_batches(id),
   event_type text not null check (event_type in ('created','updated','closed','reappeared','manual_update','unverified_update','worked','unworked')),
   changes jsonb,
+  actor text, -- who was identified in the app when this event happened (name-select, not a real login)
   detected_at timestamptz not null default now()
 );
+
+-- Safe to re-run against an existing database that predates the actor column.
+alter table public.po_line_history add column if not exists actor text;
 
 create index if not exists po_line_history_po_number_idx on public.po_line_history (po_number, detected_at);
 
