@@ -546,6 +546,17 @@ function receivedStatusOf(row){
   return 'full';
 }
 
+// RFMS decrements Amount Ordered as a PO is partially received, so that field ends up holding
+// what's still outstanding rather than the original order quantity - add back what's already
+// been received to show the true total. Skip this for 'full' rows: there, received is
+// cumulative across reorders on the same PO suffix, not a simple balance against this specific
+// order, so adding it to Amount Ordered wouldn't produce a meaningful total.
+function displayOrderedQty(row){
+  const ordered = Number(row.amount_ordered) || 0;
+  const received = Number(row.amount_received) || 0;
+  return receivedStatusOf(row) === 'partial' ? ordered + received : ordered;
+}
+
 // Shared click behavior for multiselect filter cards: clicking "All" (value === '') clears
 // the selection; clicking a value toggles it in/out of the array.
 function toggleFilterValue(filtersObj, dim, value){
@@ -725,7 +736,7 @@ function renderOpenTable(){
               <td>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
               <td>${r.reference_number || ''}</td>
               <td class="td-truncate" title="${escapeAttr((r.style_name||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
-              <td>${r.amount_ordered!=null ? Number(r.amount_ordered).toLocaleString() : '—'} ${r.units||''}${receivedStatusOf(r)!=='none' ? ` <span class="badge ${receivedStatusOf(r)==='full'?'current':'b7'}" title="Amount Received">${Number(r.amount_received).toLocaleString()} recv</span>` : ''}</td>
+              <td>${r.amount_ordered!=null ? displayOrderedQty(r).toLocaleString() : '—'} ${r.units||''}${receivedStatusOf(r)!=='none' ? ` <span class="badge ${receivedStatusOf(r)==='full'?'current':'b7'}" title="Amount Received">${Number(r.amount_received).toLocaleString()} recv</span>` : ''}</td>
               <td>${r.ordered_by || '—'}</td>
               <td>${fmtDate(r.order_date)}</td>
               <td class="promise-cell" data-po="${r.po_number}" title="Click to update the promise date">${fmtDate(r.promise_date)}${r.pending_promise_date ? ` <span class="badge b7 pending-flag" title="Unverified proposed date: ${fmtDate(r.pending_promise_date)} — not yet confirmed in RFMS">? ${fmtDate(r.pending_promise_date)}</span>` : ''}</td>
@@ -856,7 +867,7 @@ function renderLargeOrders(){
               <td>${r.store ?? '—'}</td>
               <td>${productCodeLabel(r.product_code)}</td>
               <td class="td-truncate" title="${escapeAttr((r.style_name||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
-              <td>${Number(r.amount_ordered||0).toLocaleString()} ${r.units||''}</td>
+              <td>${displayOrderedQty(r).toLocaleString()} ${r.units||''}</td>
               <td>${fmtDate(r.promise_date)}</td>
               <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
               <td>${r.po_number}</td>
