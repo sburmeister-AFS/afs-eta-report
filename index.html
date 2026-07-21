@@ -199,7 +199,7 @@ const state = {
   rollupScope: 'purchasing', // 'all' | 'purchasing' - purchasing scopes the scorecard + table to just the 10-person roster
   // orderedBy/store/vendor/bucket/worked are multiselect: an array of selected values,
   // empty array = "All" (no filter on that dimension).
-  filters: { orderedBy: [], store: [], supplier: '', vendor: [], bucket: [], worked: ['false'], search: '', activeOnly: true, purchasingOnly: false, receivedStatus: '' },
+  filters: { orderedBy: [], store: [], supplier: '', vendor: [], bucket: [], worked: ['false'], search: '', activeOnly: true, purchasingOnly: false, futuresOnly: false, receivedStatus: '' },
   sort: { col: 'past_days', dir: 'desc' },
   showCost: false,
   largeFilters: { store: [], productCode: [], threshold: 10000, activeOnly: true, etaMode: 'range', etaDate: '', etaFrom: '', etaTo: '', poSearch: '' },
@@ -619,9 +619,16 @@ function toggleFilterValue(filtersObj, dim, value){
   if(idx === -1) arr.push(value); else arr.splice(idx, 1);
 }
 
+function isFutureOrToday(row){
+  if(!row.promise_date) return false;
+  const d = pastDaysOf(row); // negative = future, 0 = due today, positive = past due
+  return d !== null && d <= 0;
+}
+
 function matchesFilters(r, filters, excludeDim){
   if(filters.activeOnly && !r.is_active) return false;
   if(filters.purchasingOnly && !isPurchasingAssociate(r.ordered_by)) return false;
+  if(filters.futuresOnly && !isFutureOrToday(r)) return false;
   if(excludeDim!=='orderedBy' && filters.orderedBy.length && !filters.orderedBy.includes(nameKey(r.ordered_by))) return false;
   if(excludeDim!=='store' && filters.store.length && !filters.store.includes(String(r.store))) return false;
   if(excludeDim!=='bucket' && filters.bucket.length && !filters.bucket.includes(bucketOf(r))) return false;
@@ -765,6 +772,7 @@ function renderOpenTable(){
         <input type="text" id="f-search" placeholder="Search PO / style / sidemark / ref#…" value="${state.filters.search}" style="min-width:220px;">
         <label><input type="checkbox" id="f-activeOnly" ${state.filters.activeOnly?'checked':''}> Active only</label>
         <label><input type="checkbox" id="f-purchasingOnly" ${state.filters.purchasingOnly?'checked':''}> Purchasing associates only</label>
+        <label><input type="checkbox" id="f-futuresOnly" ${state.filters.futuresOnly?'checked':''}> Futures</label>
         <label><input type="checkbox" id="f-showCost" ${state.showCost?'checked':''}> Show Cost</label>
         <button class="btn secondary" id="exportBtn">Export CSV</button>
         <span style="margin-left:auto;color:var(--muted);font-size:12.5px;">${rows.length.toLocaleString()} PO${rows.length===1?'':'s'}${rows.length>CAP?` (showing first ${CAP})`:''}</span>
@@ -1527,7 +1535,7 @@ function attachViewHandlers(){
       render();
     });
     document.getElementById('clearAllFiltersBtn')?.addEventListener('click', ()=>{
-      state.filters = { orderedBy: [], store: [], supplier: '', vendor: [], bucket: [], worked: [], search: '', activeOnly: true, purchasingOnly: false, receivedStatus: '' };
+      state.filters = { orderedBy: [], store: [], supplier: '', vendor: [], bucket: [], worked: [], search: '', activeOnly: true, purchasingOnly: false, futuresOnly: false, receivedStatus: '' };
       render();
     });
     document.querySelectorAll('.filter-card').forEach(btn=>{
@@ -1564,6 +1572,7 @@ function attachViewHandlers(){
     document.getElementById('f-search')?.addEventListener('input', (e)=>{ state.filters.search = e.target.value; render(); });
     document.getElementById('f-activeOnly')?.addEventListener('change', (e)=>{ state.filters.activeOnly = e.target.checked; render(); });
     document.getElementById('f-purchasingOnly')?.addEventListener('change', (e)=>{ state.filters.purchasingOnly = e.target.checked; render(); });
+    document.getElementById('f-futuresOnly')?.addEventListener('change', (e)=>{ state.filters.futuresOnly = e.target.checked; render(); });
     document.getElementById('f-showCost')?.addEventListener('change', (e)=>{ state.showCost = e.target.checked; render(); });
     document.getElementById('exportBtn')?.addEventListener('click', exportCsv);
     document.querySelectorAll('th[data-col]').forEach(th=>{
