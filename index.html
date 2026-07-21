@@ -628,7 +628,7 @@ function isFutureOrToday(row){
 function matchesFilters(r, filters, excludeDim){
   if(filters.activeOnly && !r.is_active) return false;
   if(filters.purchasingOnly && !isPurchasingAssociate(r.ordered_by)) return false;
-  if(filters.futuresOnly && !isFutureOrToday(r)) return false;
+  if(filters.futuresOnly ? !isFutureOrToday(r) : isFutureOrToday(r)) return false;
   if(excludeDim!=='orderedBy' && filters.orderedBy.length && !filters.orderedBy.includes(nameKey(r.ordered_by))) return false;
   if(excludeDim!=='store' && filters.store.length && !filters.store.includes(String(r.store))) return false;
   if(excludeDim!=='bucket' && filters.bucket.length && !filters.bucket.includes(bucketOf(r))) return false;
