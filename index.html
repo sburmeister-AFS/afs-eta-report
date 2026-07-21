@@ -1138,7 +1138,7 @@ async function processUpload(openRowsRaw, filename){
   for(const row of uploadRows){
     const prev = existingByPo.get(row.po_number);
     if(!prev){
-      upserts.push({ ...row, first_seen_batch_id: batchId, first_seen_at: nowIso, last_seen_batch_id: batchId, last_seen_at: nowIso, is_active: true });
+      upserts.push({ ...row, first_seen_batch_id: batchId, first_seen_at: nowIso, last_seen_batch_id: batchId, last_seen_at: nowIso, is_active: true, worked: false, worked_at: null });
       historyEvents.push({ po_number: row.po_number, batch_id: batchId, event_type: 'created', changes: null, actor: state.currentUser, detected_at: nowIso });
     } else {
       const changes = [];
@@ -1147,7 +1147,9 @@ async function processUpload(openRowsRaw, filename){
       });
       const wasInactive = prev.is_active === false;
       const promiseDateChanged = changes.some(c=>c.field === 'promise_date');
-      upserts.push({ ...row, first_seen_batch_id: prev.first_seen_batch_id, first_seen_at: prev.first_seen_at, last_seen_batch_id: batchId, last_seen_at: nowIso, is_active: true, ...(promiseDateChanged ? { pending_promise_date: null } : {}) });
+      // Worked is a "handled this cycle" flag, not a permanent one - every fresh upload resets it
+      // so buyers re-review the current list rather than it staying checked off indefinitely.
+      upserts.push({ ...row, first_seen_batch_id: prev.first_seen_batch_id, first_seen_at: prev.first_seen_at, last_seen_batch_id: batchId, last_seen_at: nowIso, is_active: true, worked: false, worked_at: null, ...(promiseDateChanged ? { pending_promise_date: null } : {}) });
       if(changes.length){
         historyEvents.push({ po_number: row.po_number, batch_id: batchId, event_type: wasInactive ? 'reappeared' : 'updated', changes, actor: state.currentUser, detected_at: nowIso });
       } else if(wasInactive){
@@ -1490,7 +1492,11 @@ function attachViewHandlers(){
       cb.addEventListener('click', (e)=>{
         e.stopPropagation();
         e.preventDefault(); // don't let the box actually toggle until the modal is confirmed
-        openWorkedConfirmModal(cb.dataset.po, !cb.checked);
+        // Read the proposed new value from the data model, not cb.checked - the browser already
+        // flips a checkbox's `checked` before dispatching 'click', so cb.checked here is the
+        // POST-toggle value; using it directly (or its negation) gets the direction backwards.
+        const row = state.poLines.find(r=>r.po_number === cb.dataset.po);
+        openWorkedConfirmModal(cb.dataset.po, row ? !row.worked : true);
       });
     });
     document.querySelectorAll('.copy-po-btn').forEach(btn=>{
