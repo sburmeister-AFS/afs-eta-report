@@ -81,9 +81,15 @@ create policy "anon insert" on public.po_line_history for insert with check (tru
 create table if not exists public.app_settings (
   id boolean primary key default true check (id),
   date_buffer_days integer not null default 0, -- hides All Open POs rows past-due within this many business days
+  last_received_upload_at timestamptz, -- PO Summary Report has no report_batches row of its own, so track it here
+  last_received_upload_filename text,
   updated_at timestamptz not null default now()
 );
 insert into public.app_settings (id, date_buffer_days) values (true, 0) on conflict (id) do nothing;
+
+-- Safe to re-run against an existing database that predates these columns.
+alter table public.app_settings add column if not exists last_received_upload_at timestamptz;
+alter table public.app_settings add column if not exists last_received_upload_filename text;
 
 alter table public.app_settings enable row level security;
 create policy "anon read" on public.app_settings for select using (true);

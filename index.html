@@ -204,7 +204,9 @@ const state = {
   showCost: false,
   largeFilters: { store: [], productCode: [], threshold: 10000, activeOnly: true, etaMode: 'range', etaDate: '', etaFrom: '', etaTo: '', poSearch: '' },
   largeSort: { col: 'amount_ordered', dir: 'desc' },
-  dateBufferDays: 0 // admin-set, global: hides All Open POs rows past-due within this many business days
+  dateBufferDays: 0, // admin-set, global: hides All Open POs rows past-due within this many business days
+  lastReceivedUploadAt: null,
+  lastReceivedUploadFilename: null
 };
 
 // ---------- identity ("who's using this" - a name-select for audit attribution, not a real login) ----------
@@ -318,22 +320,30 @@ async function loadLastBatch(){
   return (data && data[0]) || null;
 }
 
-async function loadDateBufferDays(){
-  const { data, error } = await sb.from('app_settings').select('date_buffer_days').eq('id', true).single();
-  if(error){ console.error(error); return 0; }
-  return (data && data.date_buffer_days) || 0;
+async function loadAppSettings(){
+  const { data, error } = await sb.from('app_settings').select('*').eq('id', true).single();
+  if(error){ console.error(error); return { date_buffer_days: 0, last_received_upload_at: null, last_received_upload_filename: null }; }
+  return data;
 }
 async function saveDateBufferDays(days){
   const { error } = await sb.from('app_settings').update({ date_buffer_days: days, updated_at: new Date().toISOString() }).eq('id', true);
   if(error) throw error;
 }
+async function saveLastReceivedUpload(filename){
+  const nowIso = new Date().toISOString();
+  const { error } = await sb.from('app_settings').update({ last_received_upload_at: nowIso, last_received_upload_filename: filename, updated_at: nowIso }).eq('id', true);
+  if(error) throw error;
+  return nowIso;
+}
 
 async function refreshData(){
   document.getElementById('lastUpdated').textContent = 'Loading…';
-  const [lines, batch, bufferDays] = await Promise.all([loadAll(), loadLastBatch(), loadDateBufferDays()]);
+  const [lines, batch, settings] = await Promise.all([loadAll(), loadLastBatch(), loadAppSettings()]);
   state.poLines = lines;
   state.lastBatch = batch;
-  state.dateBufferDays = bufferDays;
+  state.dateBufferDays = settings.date_buffer_days || 0;
+  state.lastReceivedUploadAt = settings.last_received_upload_at || null;
+  state.lastReceivedUploadFilename = settings.last_received_upload_filename || null;
   state.loadedAt = new Date();
   document.getElementById('lastUpdated').textContent = batch
     ? `Last upload: ${new Date(batch.uploaded_at).toLocaleString()} · ${batch.row_count} open POs`
@@ -933,6 +943,7 @@ function renderUpload(){
     <div class="panel">
       <h2 style="margin-top:0;">Upload Purchase Order Listing Report</h2>
       <p style="color:var(--muted);font-size:13px;">Drop the raw export below. The app filters to <code>Status = Open</code> automatically — no need to pre-clean it.</p>
+      <p style="color:var(--muted);font-size:12.5px;font-style:italic;">${state.lastBatch ? `Last uploaded: ${new Date(state.lastBatch.uploaded_at).toLocaleString()}${state.lastBatch.source_filename ? ` (${state.lastBatch.source_filename})` : ''}` : 'Never uploaded yet.'}</p>
       <div class="dropzone" id="dropzone">
         <input type="file" id="fileInput" accept=".csv" class="hidden">
         Drag & drop the Purchase Order Listing Report here, or click to choose a file
@@ -941,6 +952,7 @@ function renderUpload(){
     <div class="panel">
       <h2 style="margin-top:0;">Upload PO Summary Report</h2>
       <p style="color:var(--muted);font-size:13px;">Drop the separate RFMS export that includes an <code>Amount Received</code> column. This only updates received quantities on POs that already exist here — it won't open, close, or otherwise change any PO.</p>
+      <p style="color:var(--muted);font-size:12.5px;font-style:italic;">${state.lastReceivedUploadAt ? `Last uploaded: ${new Date(state.lastReceivedUploadAt).toLocaleString()}${state.lastReceivedUploadFilename ? ` (${state.lastReceivedUploadFilename})` : ''}` : 'Never uploaded yet.'}</p>
       <div class="dropzone" id="receivedDropzone">
         <input type="file" id="receivedFileInput" accept=".csv" class="hidden">
         Drag & drop the PO Summary Report here, or click to choose a file
@@ -1184,7 +1196,7 @@ async function handleReceivedFile(file){
       if(isNaN(received)) return;
       rows.push({ po_number: po, amount_received: received });
     },
-    complete: ()=>{ processReceivedUpload(rows).catch(err=>{
+    complete: ()=>{ processReceivedUpload(rows, file.name).catch(err=>{
       console.error(err);
       showProgress('Error: ' + err.message);
       setTimeout(hideProgress, 4000);
@@ -1193,7 +1205,7 @@ async function handleReceivedFile(file){
   });
 }
 
-async function processReceivedUpload(rows){
+async function processReceivedUpload(rows, filename){
   showProgress(`Parsed ${rows.length.toLocaleString()} rows. Matching to existing POs…`, 10);
   const existingPoSet = new Set(state.poLines.map(r=>r.po_number));
   const byPo = new Map();
@@ -1213,6 +1225,7 @@ async function processReceivedUpload(rows){
   }
 
   showProgress(`Done. ${toUpdate.length.toLocaleString()} updated${skipped ? `, ${skipped.toLocaleString()} skipped (PO not found)` : ''}. Refreshing…`, 95);
+  await saveLastReceivedUpload(filename);
   await refreshData();
   setTimeout(hideProgress, 2500);
 }
