@@ -206,7 +206,9 @@ const state = {
   largeSort: { col: 'amount_ordered', dir: 'desc' },
   dateBufferDays: 0, // admin-set, global: hides All Open POs rows past-due within this many business days
   lastReceivedUploadAt: null,
-  lastReceivedUploadFilename: null
+  lastReceivedUploadFilename: null,
+  stagedListingFile: null, // File objects held until both are ready - upload only runs once both are staged
+  stagedSummaryFile: null
 };
 
 // ---------- identity ("who's using this" - a name-select for audit attribution, not a real login) ----------
@@ -939,24 +941,46 @@ function renderLargeOrders(){
 // ============================================================
 function renderUpload(){
   if(!state.isAdmin) return `<div class="panel"><p class="empty">Admin login required.</p></div>`;
+  const listingReady = !!state.stagedListingFile;
+  const summaryReady = !!state.stagedSummaryFile;
   return `
     <div class="panel">
       <h2 style="margin-top:0;">Upload Purchase Order Listing Report</h2>
-      <p style="color:var(--muted);font-size:13px;">Drop the raw export below. The app filters to <code>Status = Open</code> automatically — no need to pre-clean it.</p>
+      <p style="color:var(--muted);font-size:13px;">Add the raw export below. The app filters to <code>Status = Open</code> automatically — no need to pre-clean it.</p>
       <p style="color:var(--muted);font-size:12.5px;font-style:italic;">${state.lastBatch ? `Last uploaded: ${new Date(state.lastBatch.uploaded_at).toLocaleString()}${state.lastBatch.source_filename ? ` (${state.lastBatch.source_filename})` : ''}` : 'Never uploaded yet.'}</p>
-      <div class="dropzone" id="dropzone">
-        <input type="file" id="fileInput" accept=".csv" class="hidden">
-        Drag & drop the Purchase Order Listing Report here, or click to choose a file
-      </div>
+      ${listingReady ? `
+        <div class="dropzone" style="border-color:var(--good);background:var(--good-bg);color:var(--good);">
+          ✓ Ready to upload: ${escapeAttr(state.stagedListingFile.name)}
+        </div>
+        <button type="button" class="btn secondary" id="clearListingFileBtn" style="margin-top:10px;">Choose a different file</button>
+      ` : `
+        <div class="dropzone" id="dropzone">
+          <input type="file" id="fileInput" accept=".csv" class="hidden">
+          Drag & drop the Purchase Order Listing Report here, or click to choose a file
+        </div>
+      `}
     </div>
     <div class="panel">
       <h2 style="margin-top:0;">Upload PO Summary Report</h2>
-      <p style="color:var(--muted);font-size:13px;">Drop the separate RFMS export that includes an <code>Amount Received</code> column. This only updates received quantities on POs that already exist here — it won't open, close, or otherwise change any PO.</p>
+      <p style="color:var(--muted);font-size:13px;">Add the separate RFMS export that includes an <code>Amount Received</code> column. This only updates received quantities on POs that already exist here — it won't open, close, or otherwise change any PO.</p>
       <p style="color:var(--muted);font-size:12.5px;font-style:italic;">${state.lastReceivedUploadAt ? `Last uploaded: ${new Date(state.lastReceivedUploadAt).toLocaleString()}${state.lastReceivedUploadFilename ? ` (${state.lastReceivedUploadFilename})` : ''}` : 'Never uploaded yet.'}</p>
-      <div class="dropzone" id="receivedDropzone">
-        <input type="file" id="receivedFileInput" accept=".csv" class="hidden">
-        Drag & drop the PO Summary Report here, or click to choose a file
-      </div>
+      ${summaryReady ? `
+        <div class="dropzone" style="border-color:var(--good);background:var(--good-bg);color:var(--good);">
+          ✓ Ready to upload: ${escapeAttr(state.stagedSummaryFile.name)}
+        </div>
+        <button type="button" class="btn secondary" id="clearSummaryFileBtn" style="margin-top:10px;">Choose a different file</button>
+      ` : `
+        <div class="dropzone" id="receivedDropzone">
+          <input type="file" id="receivedFileInput" accept=".csv" class="hidden">
+          Drag & drop the PO Summary Report here, or click to choose a file
+        </div>
+      `}
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0;">Run Upload</h2>
+      <p style="color:var(--muted);font-size:13px;">Both reports above must be added before uploading, so PO data and received quantities land together.</p>
+      <button type="button" class="btn" id="runUploadBtn" ${(listingReady && summaryReady) ? '' : 'disabled'}>Upload Both Reports</button>
+      ${(!listingReady || !summaryReady) ? `<p style="color:var(--muted);font-size:12.5px;margin-top:8px;">Still needed: ${[!listingReady?'Purchase Order Listing Report':null, !summaryReady?'PO Summary Report':null].filter(Boolean).join(', ')}</p>` : ''}
     </div>
     <div class="panel">
       <h2 style="margin-top:0;">Settings</h2>
@@ -977,20 +1001,23 @@ function attachUploadHandlers(){
   if(dz){
     const fileInput = document.getElementById('fileInput');
     dz.addEventListener('click', ()=>fileInput.click());
-    fileInput.addEventListener('change', (e)=>{ if(e.target.files[0]) handleFile(e.target.files[0]); });
+    fileInput.addEventListener('change', (e)=>{ if(e.target.files[0]){ state.stagedListingFile = e.target.files[0]; render(); } });
     ['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev, (e)=>{ e.preventDefault(); dz.classList.add('drag'); }));
     ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev, (e)=>{ e.preventDefault(); dz.classList.remove('drag'); }));
-    dz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f) handleFile(f); });
+    dz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f){ state.stagedListingFile = f; render(); } });
   }
+  document.getElementById('clearListingFileBtn')?.addEventListener('click', ()=>{ state.stagedListingFile = null; render(); });
   const rdz = document.getElementById('receivedDropzone');
   if(rdz){
     const receivedFileInput = document.getElementById('receivedFileInput');
     rdz.addEventListener('click', ()=>receivedFileInput.click());
-    receivedFileInput.addEventListener('change', (e)=>{ if(e.target.files[0]) handleReceivedFile(e.target.files[0]); });
+    receivedFileInput.addEventListener('change', (e)=>{ if(e.target.files[0]){ state.stagedSummaryFile = e.target.files[0]; render(); } });
     ['dragenter','dragover'].forEach(ev=>rdz.addEventListener(ev, (e)=>{ e.preventDefault(); rdz.classList.add('drag'); }));
     ['dragleave','drop'].forEach(ev=>rdz.addEventListener(ev, (e)=>{ e.preventDefault(); rdz.classList.remove('drag'); }));
-    rdz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f) handleReceivedFile(f); });
+    rdz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f){ state.stagedSummaryFile = f; render(); } });
   }
+  document.getElementById('clearSummaryFileBtn')?.addEventListener('click', ()=>{ state.stagedSummaryFile = null; render(); });
+  document.getElementById('runUploadBtn')?.addEventListener('click', runQueuedUploads);
   document.getElementById('saveDateBufferBtn')?.addEventListener('click', async ()=>{
     const raw = parseInt(document.getElementById('dateBufferInput').value, 10);
     const days = (isNaN(raw) || raw < 0) ? 0 : raw;
@@ -1091,26 +1118,29 @@ async function insertChunked(table, rows, chunkSize){
   }
 }
 
-async function handleFile(file){
-  showProgress('Parsing CSV…', 5);
-  const openRows = [];
-  Papa.parse(file, {
-    header: true,
-    skipEmptyLines: true,
-    worker: true,
-    step: (results)=>{
-      const r = results.data;
-      if((r['Status']||'').trim().toLowerCase() === 'open'){
-        const mapped = mapCsvRow(r);
-        if(mapped) openRows.push(mapped);
-      }
-    },
-    complete: ()=>{ processUpload(openRows, file.name).catch(err=>{
-      console.error(err);
-      showProgress('Error: ' + err.message);
-      setTimeout(hideProgress, 4000);
-    }); },
-    error: (err)=>{ showProgress('Parse error: ' + err.message); setTimeout(hideProgress, 4000); }
+function parseAndProcessListingFile(file){
+  return new Promise((resolve, reject)=>{
+    showProgress('Parsing CSV…', 5);
+    const openRows = [];
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      worker: true,
+      step: (results)=>{
+        const r = results.data;
+        if((r['Status']||'').trim().toLowerCase() === 'open'){
+          const mapped = mapCsvRow(r);
+          if(mapped) openRows.push(mapped);
+        }
+      },
+      complete: ()=>{ processUpload(openRows, file.name).then(resolve).catch(err=>{
+        console.error(err);
+        showProgress('Error: ' + err.message);
+        setTimeout(hideProgress, 4000);
+        reject(err);
+      }); },
+      error: (err)=>{ showProgress('Parse error: ' + err.message); setTimeout(hideProgress, 4000); reject(err); }
+    });
   });
 }
 
@@ -1183,28 +1213,49 @@ async function processUpload(openRowsRaw, filename){
 // ============================================================
 // RECEIVED QTY REPORT (separate file - only touches amount_received)
 // ============================================================
-async function handleReceivedFile(file){
-  showProgress('Parsing received-qty report…', 5);
-  const rows = [];
-  Papa.parse(file, {
-    header: true,
-    skipEmptyLines: true,
-    worker: true,
-    step: (results)=>{
-      const r = results.data;
-      const po = (r['PO Number']||'').trim();
-      if(!po) return;
-      const received = parseFloat(r['Amount Received']);
-      if(isNaN(received)) return;
-      rows.push({ po_number: po, amount_received: received });
-    },
-    complete: ()=>{ processReceivedUpload(rows, file.name).catch(err=>{
-      console.error(err);
-      showProgress('Error: ' + err.message);
-      setTimeout(hideProgress, 4000);
-    }); },
-    error: (err)=>{ showProgress('Parse error: ' + err.message); setTimeout(hideProgress, 4000); }
+function parseAndProcessSummaryFile(file){
+  return new Promise((resolve, reject)=>{
+    showProgress('Parsing received-qty report…', 5);
+    const rows = [];
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      worker: true,
+      step: (results)=>{
+        const r = results.data;
+        const po = (r['PO Number']||'').trim();
+        if(!po) return;
+        const received = parseFloat(r['Amount Received']);
+        if(isNaN(received)) return;
+        rows.push({ po_number: po, amount_received: received });
+      },
+      complete: ()=>{ processReceivedUpload(rows, file.name).then(resolve).catch(err=>{
+        console.error(err);
+        showProgress('Error: ' + err.message);
+        setTimeout(hideProgress, 4000);
+        reject(err);
+      }); },
+      error: (err)=>{ showProgress('Parse error: ' + err.message); setTimeout(hideProgress, 4000); reject(err); }
+    });
   });
+}
+
+async function runQueuedUploads(){
+  if(!state.stagedListingFile || !state.stagedSummaryFile) return;
+  const listingFile = state.stagedListingFile;
+  const summaryFile = state.stagedSummaryFile;
+  const btn = document.getElementById('runUploadBtn');
+  if(btn) btn.disabled = true;
+  try{
+    await parseAndProcessListingFile(listingFile);
+    await parseAndProcessSummaryFile(summaryFile);
+  } catch(err){
+    // error already surfaced via showProgress inside the parse/process functions
+  } finally {
+    state.stagedListingFile = null;
+    state.stagedSummaryFile = null;
+    render();
+  }
 }
 
 async function processReceivedUpload(rows, filename){
