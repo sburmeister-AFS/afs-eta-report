@@ -208,7 +208,8 @@ const state = {
   lastReceivedUploadAt: null,
   lastReceivedUploadFilename: null,
   stagedListingFile: null, // File objects held until both are ready - upload only runs once both are staged
-  stagedSummaryFile: null
+  stagedSummaryFile: null,
+  showAllRows: false // All Open POs table caps at 500 rows until "Show All" is clicked
 };
 
 // ---------- identity ("who's using this" - a name-select for audit attribution, not a real login) ----------
@@ -747,7 +748,7 @@ function renderOpenTable(){
   const vendorOptions = vendorOptionsList();
 
   const CAP = 500;
-  const shown = rows.slice(0, CAP);
+  const shown = state.showAllRows ? rows : rows.slice(0, CAP);
 
   return `
     <div class="panel">
@@ -775,7 +776,7 @@ function renderOpenTable(){
         <label><input type="checkbox" id="f-futuresOnly" ${state.filters.futuresOnly?'checked':''}> Futures</label>
         <label><input type="checkbox" id="f-showCost" ${state.showCost?'checked':''}> Show Cost</label>
         <button class="btn secondary" id="exportBtn">Export CSV</button>
-        <span style="margin-left:auto;color:var(--muted);font-size:12.5px;">${rows.length.toLocaleString()} PO${rows.length===1?'':'s'}${rows.length>CAP?` (showing first ${CAP})`:''}</span>
+        <span style="margin-left:auto;color:var(--muted);font-size:12.5px;">${rows.length.toLocaleString()} PO${rows.length===1?'':'s'}${(rows.length>CAP && !state.showAllRows)?` (showing first ${CAP})`:''}</span>
       </div>
       <table>
         <thead><tr>
@@ -811,6 +812,11 @@ function renderOpenTable(){
           `).join('') : `<tr><td colspan="${state.showCost ? 12 : 11}" class="empty">No POs match these filters.</td></tr>`}
         </tbody>
       </table>
+      ${(rows.length > CAP && !state.showAllRows) ? `
+        <div style="text-align:center;margin-top:14px;">
+          <button type="button" class="btn secondary" id="showAllRowsBtn">Show All ${rows.length.toLocaleString()} POs</button>
+        </div>
+      ` : ''}
     </div>
   `;
 }
@@ -1575,6 +1581,7 @@ function attachViewHandlers(){
     document.getElementById('f-futuresOnly')?.addEventListener('change', (e)=>{ state.filters.futuresOnly = e.target.checked; render(); });
     document.getElementById('f-showCost')?.addEventListener('change', (e)=>{ state.showCost = e.target.checked; render(); });
     document.getElementById('exportBtn')?.addEventListener('click', exportCsv);
+    document.getElementById('showAllRowsBtn')?.addEventListener('click', ()=>{ state.showAllRows = true; render(); });
     document.querySelectorAll('th[data-col]').forEach(th=>{
       th.addEventListener('click', ()=>{
         const col = th.dataset.col;
