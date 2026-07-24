@@ -46,6 +46,8 @@
   .copy-po-btn:hover{background:#eef1f6;}
   .promise-cell{cursor:pointer;}
   .promise-cell:hover{text-decoration:underline;text-decoration-style:dotted;}
+  .reference-cell{cursor:pointer;}
+  .reference-cell:hover{text-decoration:underline;text-decoration-style:dotted;}
   .pending-flag{margin-left:6px;}
   .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px;}
   .toolbar select, .toolbar input[type=text], .toolbar input[type=number], .toolbar input[type=date]{padding:7px 10px;border:1px solid var(--border);border-radius:7px;font-size:13px;background:#fff;}
@@ -800,7 +802,7 @@ function renderOpenTable(){
               <td>${r.store ?? '—'}</td>
               <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
               <td>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
-              <td>${r.reference_number || ''}</td>
+              <td class="reference-cell" data-po="${r.po_number}" title="Click to update the reference number">${r.reference_number || ''}</td>
               <td class="td-truncate" title="${escapeAttr((r.style_name||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
               <td>${r.amount_ordered!=null ? displayOrderedQty(r).toLocaleString() : '—'} ${r.units||''}${receivedStatusOf(r)!=='none' ? ` <span class="badge ${receivedStatusOf(r)==='full'?'current':'b7'}" title="Amount Received">${Number(r.amount_received).toLocaleString()} recv</span>` : ''}</td>
               <td>${r.ordered_by || '—'}</td>
@@ -1323,7 +1325,7 @@ async function openHistoryModal(poNumber){
       body = (ev.changes||[]).map(c=>`<div class="tl-diff"><span class="f">${c.field}:</span> ${c.old ?? '—'} → <strong>${c.new ?? '—'}</strong></div>`).join('');
     }
     else if(ev.event_type === 'manual_update'){
-      body = (ev.changes||[]).map(c=>`<div class="tl-diff"><span class="f">${c.field}:</span> ${c.old ?? '—'} → <strong>${c.new ?? '—'}</strong> <span style="color:var(--good);">(confirmed in RFMS)</span></div>`).join('');
+      body = (ev.changes||[]).map(c=>`<div class="tl-diff"><span class="f">${c.field}:</span> ${c.old ?? '—'} → <strong>${c.new ?? '—'}</strong>${c.field==='promise_date' ? ' <span style="color:var(--good);">(confirmed in RFMS)</span>' : ''}</div>`).join('');
     }
     else if(ev.event_type === 'unverified_update'){
       body = (ev.changes||[]).map(c=>`<div class="tl-diff"><span class="f">${c.field}:</span> ${c.old ?? '—'} → <strong>${c.new ?? '—'}</strong> <span style="color:var(--warn);">(unverified — not yet confirmed in RFMS)</span></div>`).join('');
@@ -1402,6 +1404,62 @@ async function savePromiseUpdate(poNumber){
       if(histErr) throw histErr;
       row.pending_promise_date = newDate;
     }
+    closeModal();
+    render();
+  } catch(err){
+    errBox.textContent = 'Error saving: ' + err.message;
+    errBox.classList.remove('hidden');
+    btn.disabled = false; btn.textContent = 'Save';
+  }
+}
+
+// ============================================================
+// Reference # manual edit (click-to-edit on All Open POs, same pattern as Promise Date but
+// without the RFMS-verified distinction - reference # has no "pending/unverified" concept).
+// Like Promise Date, the next Purchase Order Listing Report upload always overwrites this with
+// whatever RFMS has, since the upsert always spreads the fresh CSV row over the existing one.
+// ============================================================
+function openReferenceEditModal(poNumber){
+  const row = state.poLines.find(r=>r.po_number === poNumber);
+  if(!row) return;
+  showModal(`
+    <span class="close" id="modalClose">&times;</span>
+    <h2>Update Reference #</h2>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:14px;">
+      <strong>${poNumber}</strong> · ${row.supplier || ''} · ${row.style_name || ''}${row.color_desc ? (' · '+row.color_desc) : ''}<br>
+      Current reference #: <strong>${escapeAttr(row.reference_number) || '—'}</strong>
+    </div>
+    <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;">New reference #</label>
+    <input type="text" id="referenceInput" value="${escapeAttr(row.reference_number)}" style="padding:8px 10px;border:1px solid var(--border);border-radius:7px;width:100%;margin-bottom:14px;">
+    <p style="color:var(--muted);font-size:12px;margin-bottom:16px;">This will be overwritten again the next time a Purchase Order Listing Report upload has a different value for this PO.</p>
+    <div id="referenceError" class="pw-error hidden"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn secondary" id="referenceCancelBtn">Cancel</button>
+      <button class="btn" id="referenceSaveBtn">Save</button>
+    </div>
+  `);
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+  document.getElementById('referenceCancelBtn').addEventListener('click', closeModal);
+  document.getElementById('referenceSaveBtn').addEventListener('click', ()=>saveReferenceUpdate(poNumber));
+}
+
+async function saveReferenceUpdate(poNumber){
+  const row = state.poLines.find(r=>r.po_number === poNumber);
+  if(!row) return;
+  const newRef = document.getElementById('referenceInput').value.trim() || null;
+  const oldRef = row.reference_number;
+  const btn = document.getElementById('referenceSaveBtn');
+  const errBox = document.getElementById('referenceError');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const nowIso = new Date().toISOString();
+  try{
+    const { error } = await sb.from('po_lines').update({ reference_number: newRef }).eq('po_number', poNumber);
+    if(error) throw error;
+    if(!valuesEqual(oldRef, newRef)){
+      const { error: histErr } = await sb.from('po_line_history').insert({ po_number: poNumber, batch_id: null, event_type: 'manual_update', changes: [{ field: 'reference_number', old: oldRef, new: newRef }], actor: state.currentUser, detected_at: nowIso });
+      if(histErr) throw histErr;
+    }
+    row.reference_number = newRef;
     closeModal();
     render();
   } catch(err){
@@ -1552,6 +1610,9 @@ function attachViewHandlers(){
     });
     document.querySelectorAll('td.promise-cell').forEach(td=>{
       td.addEventListener('click', (e)=>{ e.stopPropagation(); openPromiseEditModal(td.dataset.po); });
+    });
+    document.querySelectorAll('td.reference-cell').forEach(td=>{
+      td.addEventListener('click', (e)=>{ e.stopPropagation(); openReferenceEditModal(td.dataset.po); });
     });
     document.querySelectorAll('.worked-checkbox').forEach(cb=>{
       cb.addEventListener('click', (e)=>{
