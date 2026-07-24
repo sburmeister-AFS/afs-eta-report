@@ -41,11 +41,17 @@ create table if not exists public.po_lines (
   is_active boolean not null default true,
   pending_promise_date date, -- proposed date entered in-app but not yet confirmed in RFMS
   worked boolean not null default false, -- buyer has worked this PO from the All Open POs page
-  worked_at timestamptz
+  worked_at timestamptz,
+  sales_person text, -- from the separate Open Orders Detailed sales export, matched by base order number (po_number minus its "-NNNN" line suffix)
+  sales_entered_by text,
+  division text -- "Customer Type" in that export (BUILDER, HOMEOWNER, etc.)
 );
 
 -- Safe to re-run against an existing database that predates the amount_received column.
 alter table public.po_lines add column if not exists amount_received numeric;
+alter table public.po_lines add column if not exists sales_person text;
+alter table public.po_lines add column if not exists sales_entered_by text;
+alter table public.po_lines add column if not exists division text;
 
 create index if not exists po_lines_ordered_by_idx on public.po_lines (ordered_by);
 create index if not exists po_lines_store_idx on public.po_lines (store);
@@ -83,6 +89,8 @@ create table if not exists public.app_settings (
   date_buffer_days integer not null default 0, -- hides All Open POs rows past-due within this many business days
   last_received_upload_at timestamptz, -- PO Summary Report has no report_batches row of its own, so track it here
   last_received_upload_filename text,
+  last_sales_upload_at timestamptz, -- same, for the Open Orders Detailed sales data upload
+  last_sales_upload_filename text,
   updated_at timestamptz not null default now()
 );
 insert into public.app_settings (id, date_buffer_days) values (true, 0) on conflict (id) do nothing;
@@ -90,6 +98,8 @@ insert into public.app_settings (id, date_buffer_days) values (true, 0) on confl
 -- Safe to re-run against an existing database that predates these columns.
 alter table public.app_settings add column if not exists last_received_upload_at timestamptz;
 alter table public.app_settings add column if not exists last_received_upload_filename text;
+alter table public.app_settings add column if not exists last_sales_upload_at timestamptz;
+alter table public.app_settings add column if not exists last_sales_upload_filename text;
 
 alter table public.app_settings enable row level security;
 create policy "anon read" on public.app_settings for select using (true);

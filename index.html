@@ -6,6 +6,7 @@
 <title>ETA Report</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   :root{
     --bg:#f5f6f8; --panel:#ffffff; --border:#e2e4e9; --text:#1c2230; --muted:#6b7280;
@@ -209,6 +210,8 @@ const state = {
   dateBufferDays: 0, // admin-set, global: hides All Open POs rows past-due within this many business days
   lastReceivedUploadAt: null,
   lastReceivedUploadFilename: null,
+  lastSalesUploadAt: null,
+  lastSalesUploadFilename: null,
   stagedListingFile: null, // File objects held until both are ready - upload only runs once both are staged
   stagedSummaryFile: null,
   showAllRows: false // All Open POs table caps at 500 rows until "Show All" is clicked
@@ -340,6 +343,12 @@ async function saveLastReceivedUpload(filename){
   if(error) throw error;
   return nowIso;
 }
+async function saveLastSalesUpload(filename){
+  const nowIso = new Date().toISOString();
+  const { error } = await sb.from('app_settings').update({ last_sales_upload_at: nowIso, last_sales_upload_filename: filename, updated_at: nowIso }).eq('id', true);
+  if(error) throw error;
+  return nowIso;
+}
 
 async function refreshData(){
   document.getElementById('lastUpdated').textContent = 'Loading…';
@@ -349,6 +358,8 @@ async function refreshData(){
   state.dateBufferDays = settings.date_buffer_days || 0;
   state.lastReceivedUploadAt = settings.last_received_upload_at || null;
   state.lastReceivedUploadFilename = settings.last_received_upload_filename || null;
+  state.lastSalesUploadAt = settings.last_sales_upload_at || null;
+  state.lastSalesUploadFilename = settings.last_sales_upload_filename || null;
   state.loadedAt = new Date();
   document.getElementById('lastUpdated').textContent = batch
     ? `Last upload: ${new Date(batch.uploaded_at).toLocaleString()} · ${batch.row_count} open POs`
@@ -801,7 +812,7 @@ function renderOpenTable(){
               <td><input type="checkbox" class="worked-checkbox" data-po="${r.po_number}" ${r.worked?'checked':''}></td>
               <td>${r.store ?? '—'}</td>
               <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
-              <td>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
+              <td${salesInfoTooltip(r) ? ` title="${escapeAttr(salesInfoTooltip(r))}"` : ''}>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
               <td class="reference-cell" data-po="${r.po_number}" title="Click to update the reference number">${r.reference_number || ''}</td>
               <td class="td-truncate" title="${escapeAttr((r.style_name||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
               <td>${r.amount_ordered!=null ? displayOrderedQty(r).toLocaleString() : '—'} ${r.units||''}${receivedStatusOf(r)!=='none' ? ` <span class="badge ${receivedStatusOf(r)==='full'?'current':'b7'}" title="Amount Received">${Number(r.amount_received).toLocaleString()} recv</span>` : ''}</td>
@@ -999,6 +1010,15 @@ function renderUpload(){
       ${(!listingReady || !summaryReady) ? `<p style="color:var(--muted);font-size:12.5px;margin-top:8px;">Still needed: ${[!listingReady?'Purchase Order Listing Report':null, !summaryReady?'PO Summary Report':null].filter(Boolean).join(', ')}</p>` : ''}
     </div>
     <div class="panel">
+      <h2 style="margin-top:0;">Upload Sales Data</h2>
+      <p style="color:var(--muted);font-size:13px;">Add the "Open Orders Detailed" export (.xlsx) from RFMS. Matches each order to POs by order number and fills in Sales Person, Entered By, and Division - shown as a tooltip when you hover a PO number on All Open POs. Independent of the two reports above; uploads immediately.</p>
+      <p style="color:var(--muted);font-size:12.5px;font-style:italic;">${state.lastSalesUploadAt ? `Last uploaded: ${new Date(state.lastSalesUploadAt).toLocaleString()}${state.lastSalesUploadFilename ? ` (${state.lastSalesUploadFilename})` : ''}` : 'Never uploaded yet.'}</p>
+      <div class="dropzone" id="salesDropzone">
+        <input type="file" id="salesFileInput" accept=".xlsx,.xls" class="hidden">
+        Drag & drop the Open Orders Detailed export here, or click to choose a file
+      </div>
+    </div>
+    <div class="panel">
       <h2 style="margin-top:0;">Settings</h2>
       <p style="color:var(--muted);font-size:13px;">Date Buffer: hides a PO from All Open POs while it's still within this many business days (Mon-Fri) of going past due, so buyers aren't chasing something that just barely missed its promise date. Applies for everyone, not just admins. 0 = off.</p>
       <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:6px;">Date Buffer (business days)</label>
@@ -1033,6 +1053,15 @@ function attachUploadHandlers(){
     rdz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f){ state.stagedSummaryFile = f; render(); } });
   }
   document.getElementById('clearSummaryFileBtn')?.addEventListener('click', ()=>{ state.stagedSummaryFile = null; render(); });
+  const sdz = document.getElementById('salesDropzone');
+  if(sdz){
+    const salesFileInput = document.getElementById('salesFileInput');
+    sdz.addEventListener('click', ()=>salesFileInput.click());
+    salesFileInput.addEventListener('change', (e)=>{ if(e.target.files[0]) parseAndProcessSalesFile(e.target.files[0]); });
+    ['dragenter','dragover'].forEach(ev=>sdz.addEventListener(ev, (e)=>{ e.preventDefault(); sdz.classList.add('drag'); }));
+    ['dragleave','drop'].forEach(ev=>sdz.addEventListener(ev, (e)=>{ e.preventDefault(); sdz.classList.remove('drag'); }));
+    sdz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f) parseAndProcessSalesFile(f); });
+  }
   document.getElementById('runUploadBtn')?.addEventListener('click', runQueuedUploads);
   document.getElementById('saveDateBufferBtn')?.addEventListener('click', async ()=>{
     const raw = parseInt(document.getElementById('dateBufferInput').value, 10);
@@ -1297,6 +1326,103 @@ async function processReceivedUpload(rows, filename){
   await saveLastReceivedUpload(filename);
   await refreshData();
   setTimeout(hideProgress, 2500);
+}
+
+// ============================================================
+// SALES DATA (Open Orders Detailed .xlsx) - standalone upload, not part of the paired
+// listing/summary queue. Only enriches sales_person/sales_entered_by/division on POs that
+// already exist; never opens/closes/creates POs.
+// ============================================================
+// po_number is "<base order #>-<NNNN line suffix>", optionally "#"-prefixed for special-order
+// tracking numbers (which have no corresponding sales order and simply won't match anything).
+function salesInfoTooltip(row){
+  const parts = [];
+  if(row.sales_person) parts.push(`Sales Person: ${row.sales_person}`);
+  if(row.sales_entered_by) parts.push(`Entered By: ${row.sales_entered_by}`);
+  if(row.division) parts.push(`Division: ${row.division}`);
+  return parts.join('\n');
+}
+
+function baseOrderNumber(poNumber){
+  if(!poNumber) return null;
+  return String(poNumber).replace(/^#/, '').replace(/-\d+$/, '');
+}
+
+// The report is a print-style export: each order is a variable-length block starting at a row
+// whose first cell is "Order #: <num>", with labeled fields scattered at specific columns
+// within roughly the next 10 rows. Scanning for the label text (rather than assuming fixed row
+// offsets) is more robust to minor layout variation between orders.
+function parseSalesGrid(grid){
+  const map = new Map();
+  for(let r = 0; r < grid.length; r++){
+    const row = grid[r] || [];
+    const first = row[0];
+    if(typeof first !== 'string' || !first.trim().startsWith('Order #:')) continue;
+    const orderNum = first.replace(/Order #:\s*/,'').trim();
+    if(!orderNum) continue;
+    const info = { sales_person: null, sales_entered_by: null, division: null };
+    const windowEnd = Math.min(r + 10, grid.length - 1);
+    for(let rr = r; rr <= windowEnd; rr++){
+      const wrow = grid[rr] || [];
+      for(let cc = 0; cc < wrow.length; cc++){
+        const cell = wrow[cc];
+        if(typeof cell !== 'string') continue;
+        const t = cell.trim();
+        if(t === 'Salesperson 1:' && wrow[cc+1]) info.sales_person = String(wrow[cc+1]).trim() || null;
+        else if(t === 'Customer Type:' && wrow[cc+1]) info.division = String(wrow[cc+1]).trim() || null;
+        else if(t.startsWith('Entered By:')){
+          // value is "AMFS-VSRV-RDPn:firstname.lastname" in the same cell as the label
+          const raw = t.slice('Entered By:'.length).trim();
+          const parts = raw.split(':');
+          info.sales_entered_by = (parts[parts.length-1] || raw).trim() || null;
+        }
+      }
+    }
+    map.set(orderNum, info);
+  }
+  return map;
+}
+
+async function parseAndProcessSalesFile(file){
+  showProgress('Parsing sales data…', 5);
+  try{
+    const arrayBuffer = await file.arrayBuffer();
+    const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: null });
+    const salesMap = parseSalesGrid(grid);
+    showProgress(`Parsed ${salesMap.size.toLocaleString()} sales orders. Matching to POs…`, 20);
+
+    const toUpdate = [];
+    for(const row of state.poLines){
+      const base = baseOrderNumber(row.po_number);
+      const info = base ? salesMap.get(base) : null;
+      if(!info) continue;
+      if(row.sales_person !== info.sales_person || row.sales_entered_by !== info.sales_entered_by || row.division !== info.division){
+        toUpdate.push([row.po_number, info]);
+      }
+    }
+
+    const CONCURRENCY = 20;
+    let done = 0;
+    for(let i=0; i<toUpdate.length; i+=CONCURRENCY){
+      const batch = toUpdate.slice(i, i+CONCURRENCY);
+      await Promise.all(batch.map(([po, info])=>
+        sb.from('po_lines').update({ sales_person: info.sales_person, sales_entered_by: info.sales_entered_by, division: info.division }).eq('po_number', po)
+      ));
+      done += batch.length;
+      showProgress(`Updating PO lines… ${done.toLocaleString()} / ${toUpdate.length.toLocaleString()}`, 20 + (done/Math.max(toUpdate.length,1))*70);
+    }
+
+    showProgress(`Done. ${toUpdate.length.toLocaleString()} POs updated from ${salesMap.size.toLocaleString()} sales orders. Refreshing…`, 95);
+    await saveLastSalesUpload(file.name);
+    await refreshData();
+    setTimeout(hideProgress, 2500);
+  } catch(err){
+    console.error(err);
+    showProgress('Error: ' + err.message);
+    setTimeout(hideProgress, 4000);
+  }
 }
 
 // ============================================================
