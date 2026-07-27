@@ -1011,11 +1011,11 @@ function renderUpload(){
     </div>
     <div class="panel">
       <h2 style="margin-top:0;">Upload Sales Data</h2>
-      <p style="color:var(--muted);font-size:13px;">Add the "Open Orders Detailed" export (.xlsx) from RFMS. Matches each order to POs by order number and fills in Sales Person, Entered By, and Division - shown as a tooltip when you hover a PO number on All Open POs. Independent of the two reports above; uploads immediately.</p>
+      <p style="color:var(--muted);font-size:13px;">Drop either the raw "Open Orders Detailed" export (.xlsx) from RFMS, or the combined CSV produced by the offline ExtractSalesData.ps1 script (recommended - run it against a folder of exports first to check the data before it goes anywhere near this app). Matches each order to POs by order number and fills in Sales Person, Entered By, and Division - shown as a tooltip when you hover a PO number on All Open POs. Independent of the two reports above; uploads immediately.</p>
       <p style="color:var(--muted);font-size:12.5px;font-style:italic;">${state.lastSalesUploadAt ? `Last uploaded: ${new Date(state.lastSalesUploadAt).toLocaleString()}${state.lastSalesUploadFilename ? ` (${state.lastSalesUploadFilename})` : ''}` : 'Never uploaded yet.'}</p>
       <div class="dropzone" id="salesDropzone">
-        <input type="file" id="salesFileInput" accept=".xlsx,.xls" class="hidden">
-        Drag & drop the Open Orders Detailed export here, or click to choose a file
+        <input type="file" id="salesFileInput" accept=".csv,.xlsx,.xls" class="hidden">
+        Drag & drop the sales data export or extracted CSV here, or click to choose a file
       </div>
     </div>
     <div class="panel">
@@ -1383,14 +1383,45 @@ function parseSalesGrid(grid){
   return map;
 }
 
+// Raw RFMS export: print-style block layout, parsed via parseSalesGrid.
+async function getSalesMapFromXlsx(file){
+  const arrayBuffer = await file.arrayBuffer();
+  const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: null });
+  return parseSalesGrid(grid);
+}
+
+// Pre-extracted CSV from the offline ExtractSalesData.ps1 script: a flat table with headers
+// "Order #", "Sales Person", "Entered By", "Division" - one row per order, no block-parsing needed.
+function getSalesMapFromCsv(file){
+  return new Promise((resolve, reject)=>{
+    const map = new Map();
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results)=>{
+        results.data.forEach(r=>{
+          const orderNum = (r['Order #']||'').trim();
+          if(!orderNum) return;
+          map.set(orderNum, {
+            sales_person: (r['Sales Person']||'').trim() || null,
+            sales_entered_by: (r['Entered By']||'').trim() || null,
+            division: (r['Division']||'').trim() || null
+          });
+        });
+        resolve(map);
+      },
+      error: reject
+    });
+  });
+}
+
 async function parseAndProcessSalesFile(file){
   showProgress('Parsing sales data…', 5);
   try{
-    const arrayBuffer = await file.arrayBuffer();
-    const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: null });
-    const salesMap = parseSalesGrid(grid);
+    const isCsv = /\.csv$/i.test(file.name);
+    const salesMap = isCsv ? await getSalesMapFromCsv(file) : await getSalesMapFromXlsx(file);
     showProgress(`Parsed ${salesMap.size.toLocaleString()} sales orders. Matching to POs…`, 20);
 
     const toUpdate = [];
