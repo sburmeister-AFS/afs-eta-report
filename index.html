@@ -214,7 +214,8 @@ const state = {
   lastSalesUploadFilename: null,
   stagedListingFile: null, // File objects held until both are ready - upload only runs once both are staged
   stagedSummaryFile: null,
-  showAllRows: false // All Open POs table caps at 500 rows until "Show All" is clicked
+  showAllRows: false, // All Open POs table caps at 500 rows until "Show All" is clicked
+  showAllSalesResults: false // same cap pattern for the Sales Data match-results table on Upload
 };
 
 // ---------- identity ("who's using this" - a name-select for audit attribution, not a real login) ----------
@@ -964,6 +965,63 @@ function renderLargeOrders(){
 }
 
 // ============================================================
+// Sales Data match results (live view of current po_lines state, not a one-time upload
+// receipt - so it stays accurate no matter when/how a PO got its sales fields set, and
+// automatically reflects a fresh extract right after upload without extra plumbing).
+// ============================================================
+function renderSalesResultsPanel(){
+  const active = state.poLines.filter(r=>r.is_active);
+  const hasSalesData = (r)=> !!(r.sales_person || r.sales_entered_by || r.division);
+  const matched = active.filter(hasSalesData);
+  const unmatched = active.filter(r=>!hasSalesData(r));
+  const rows = [...matched, ...unmatched]; // matched first, so the interesting ones surface without scrolling
+
+  const CAP = 500;
+  const shown = state.showAllSalesResults ? rows : rows.slice(0, CAP);
+
+  return `
+    <div class="panel">
+      <h2 style="margin-top:0;">Sales Data Match Results</h2>
+      <p style="color:var(--muted);font-size:13px;">Which open POs currently have Sales Person / Entered By / Division filled in from a sales data upload, and which don't.</p>
+      <div class="stat-row">
+        <div class="stat"><div class="num">${active.length.toLocaleString()}</div><div class="label">Open POs</div></div>
+        <div class="stat"><div class="num" style="color:var(--good);">${matched.length.toLocaleString()}</div><div class="label">Matched</div></div>
+        <div class="stat"><div class="num" style="color:var(--muted);">${unmatched.length.toLocaleString()}</div><div class="label">Not Matched</div></div>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Matched</th>
+          <th>PO Number</th>
+          <th>Supplier</th>
+          <th>Style / Color</th>
+          <th>Sales Person</th>
+          <th>Entered By</th>
+          <th>Division</th>
+        </tr></thead>
+        <tbody>
+          ${shown.length ? shown.map(r=>`
+            <tr>
+              <td>${hasSalesData(r) ? '<span class="badge current">Yes</span>' : '<span class="badge blank">No</span>'}</td>
+              <td>${r.po_number}</td>
+              <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
+              <td class="td-truncate" title="${escapeAttr((r.style_name||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_name || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
+              <td>${r.sales_person || ''}</td>
+              <td>${r.sales_entered_by || ''}</td>
+              <td>${r.division || ''}</td>
+            </tr>
+          `).join('') : `<tr><td colspan="7" class="empty">No open POs.</td></tr>`}
+        </tbody>
+      </table>
+      ${(rows.length > CAP && !state.showAllSalesResults) ? `
+        <div style="text-align:center;margin-top:14px;">
+          <button type="button" class="btn secondary" id="showAllSalesResultsBtn">Show All ${rows.length.toLocaleString()} POs</button>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+// ============================================================
 // UPLOAD
 // ============================================================
 function renderUpload(){
@@ -1018,6 +1076,7 @@ function renderUpload(){
         Drag & drop the sales data export or extracted CSV here, or click to choose a file
       </div>
     </div>
+    ${renderSalesResultsPanel()}
     <div class="panel">
       <h2 style="margin-top:0;">Settings</h2>
       <p style="color:var(--muted);font-size:13px;">Date Buffer: hides a PO from All Open POs while it's still within this many business days (Mon-Fri) of going past due, so buyers aren't chasing something that just barely missed its promise date. Applies for everyone, not just admins. 0 = off.</p>
@@ -1033,6 +1092,7 @@ function renderUpload(){
 }
 
 function attachUploadHandlers(){
+  document.getElementById('showAllSalesResultsBtn')?.addEventListener('click', ()=>{ state.showAllSalesResults = true; render(); });
   const dz = document.getElementById('dropzone');
   if(dz){
     const fileInput = document.getElementById('fileInput');
