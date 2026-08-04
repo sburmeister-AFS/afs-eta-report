@@ -75,6 +75,7 @@
   .badge.sev-major{background:var(--bad-bg);color:var(--bad);}
   .badge.sev-intermediate{background:var(--warn-bg);color:var(--warn);}
   .badge.sev-slight{background:#eef1f6;color:var(--accent-dark);}
+  .badge.sev-new{background:#e3ecfd;color:var(--accent-dark);}
   .cell-good{background:var(--good-bg);color:var(--good);font-weight:700;}
   .cell-bad{background:var(--bad-bg);color:var(--bad);font-weight:700;}
   .cell-warn{background:var(--warn-bg);color:var(--warn);font-weight:700;}
@@ -342,8 +343,9 @@ async function loadLastBatch(){
 // Only pushes (new > old) count - a date pulled in is good news, not flagged.
 // Bands mirror the app's existing past-due bucket spacing.
 const CHANGES_WINDOW_BATCHES = 5;
-const SEVERITY_LABELS = { major: 'Major (28+ days)', intermediate: 'Intermediate (14-27 days)', slight: 'Slight (7-13 days)' };
-const SEVERITY_ORDER = ['major', 'intermediate', 'slight'];
+const NEW_PO_LEAD_THRESHOLD_DAYS = 30; // flag a brand-new PO if its ETA is already more than this many days out
+const SEVERITY_LABELS = { new: 'New PO, 30+ Days Out', major: 'Major (28+ days)', intermediate: 'Intermediate (14-27 days)', slight: 'Slight (7-13 days)' };
+const SEVERITY_ORDER = ['new', 'major', 'intermediate', 'slight'];
 function severityOf(deltaDays){
   if(deltaDays >= 28) return 'major';
   if(deltaDays >= 14) return 'intermediate';
@@ -364,7 +366,7 @@ async function loadEtaChanges(){
     const { data, error } = await sb.from('po_line_history')
       .select('po_number,batch_id,event_type,changes,detected_at')
       .in('batch_id', batchIds)
-      .in('event_type', ['updated', 'reappeared'])
+      .in('event_type', ['updated', 'reappeared', 'created'])
       .range(from, from + pageSize - 1);
     if(error) throw error;
     historyRows = historyRows.concat(data);
@@ -377,6 +379,30 @@ async function loadEtaChanges(){
 
   const events = [];
   historyRows.forEach(h=>{
+    if(h.event_type === 'created'){
+      const po = poByNumber.get(h.po_number);
+      if(!po || po.is_active === false || !po.promise_date) return;
+      const daysOut = -pastDaysOf(po); // pastDaysOf is negative for a future date
+      if(daysOut <= NEW_PO_LEAD_THRESHOLD_DAYS) return;
+      const batch = batchById.get(h.batch_id);
+      events.push({
+        po_number: h.po_number,
+        supplier: po.supplier,
+        store: po.store,
+        is_active: po.is_active,
+        sales_person: po.sales_person,
+        division: po.division,
+        old_date: null,
+        new_date: po.promise_date,
+        delta_days: daysOut,
+        severity: 'new',
+        batch_id: h.batch_id,
+        batch_date: batch ? batch.uploaded_at : null,
+        batch_filename: batch ? batch.source_filename : null
+      });
+      return;
+    }
+
     if(!Array.isArray(h.changes)) return;
     const pdChange = h.changes.find(c=>c.field === 'promise_date');
     if(!pdChange || !pdChange.old || !pdChange.new) return; // no prior date to push FROM, nothing to measure
@@ -1116,7 +1142,8 @@ function renderEtaChanges(){
     <div class="panel">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:4px;">
         <p style="color:var(--muted);font-size:13px;margin:0;max-width:640px;">
-          Promise-date pushes of 7+ days across the last ${batches.length} upload${batches.length===1?'':'s'}
+          Promise-date pushes of 7+ days, plus brand-new POs whose ETA is already ${NEW_PO_LEAD_THRESHOLD_DAYS}+ days out,
+          across the last ${batches.length} upload${batches.length===1?'':'s'}
           (${new Date(oldestBatch.uploaded_at).toLocaleDateString()} – ${new Date(newestBatch.uploaded_at).toLocaleDateString()}).
           Only dates that moved <strong>later</strong> are shown — a date pulled in isn't flagged.
         </p>
@@ -1142,7 +1169,7 @@ function renderEtaChanges(){
           <th data-col="division">Division</th>
           <th data-col="old_date">Previous ETA</th>
           <th data-col="new_date">New ETA</th>
-          <th data-col="delta_days">Days Pushed</th>
+          <th data-col="delta_days">Days</th>
           <th data-col="batch_date">Upload Date</th>
         </tr></thead>
         <tbody>
@@ -1156,7 +1183,7 @@ function renderEtaChanges(){
               <td>${r.division || '—'}</td>
               <td>${fmtDate(r.old_date)}</td>
               <td>${fmtDate(r.new_date)}</td>
-              <td>${r.delta_days}d</td>
+              <td>${r.delta_days}d ${r.severity==='new'?'out':'later'}</td>
               <td>${r.batch_date ? new Date(r.batch_date).toLocaleDateString() : '—'}</td>
             </tr>
           `).join('') : `<tr><td colspan="10" class="empty">No qualifying ETA pushes in this window.</td></tr>`}
@@ -1196,11 +1223,14 @@ function buildNotifyEmailBody(name, list){
   const lines = [
     `Hi ${firstName},`,
     '',
-    `The following ${sorted.length} PO${sorted.length===1?'':'s'} had their ETA pushed later on a recent upload:`,
+    `The following ${sorted.length} PO${sorted.length===1?'':'s'} need your attention on a recent upload:`,
     ''
   ];
   sorted.forEach(e=>{
-    lines.push(`- PO ${e.po_number} (Store ${e.store ?? '—'}, ${e.supplier || 'Unknown supplier'}): ${fmtDate(e.old_date)} -> ${fmtDate(e.new_date)} (${e.delta_days}d, ${e.severity})`);
+    const detail = e.severity === 'new'
+      ? `new PO, ETA already ${e.delta_days}d out (${fmtDate(e.new_date)})`
+      : `${fmtDate(e.old_date)} -> ${fmtDate(e.new_date)} (${e.delta_days}d later, ${e.severity})`;
+    lines.push(`- PO ${e.po_number} (Store ${e.store ?? '—'}, ${e.supplier || 'Unknown supplier'}): ${detail}`);
   });
   lines.push('', 'Let me know if you have questions.');
   return lines.join('\n');
