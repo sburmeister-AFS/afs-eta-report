@@ -392,6 +392,8 @@ async function loadEtaChanges(){
       supplier: po ? po.supplier : null,
       store: po ? po.store : null,
       is_active: po ? po.is_active : null,
+      sales_person: po ? po.sales_person : null,
+      division: po ? po.division : null,
       old_date: pdChange.old,
       new_date: pdChange.new,
       delta_days: deltaDays,
@@ -1068,6 +1070,15 @@ function changesSeverityFacetCounts(events){
   return counts;
 }
 
+// Currently-filtered change events, shared by the table render and the Notify Salespeople
+// modal so "Notify" acts on whatever severities are filtered in, not the whole window.
+function filteredChangesEvents(){
+  if(!state.changesData || !state.changesData.events) return [];
+  const events = state.changesData.events;
+  const activeSeverities = state.changesFilters.severity;
+  return activeSeverities.length ? events.filter(e=>activeSeverities.includes(e.severity)) : events.slice();
+}
+
 function renderEtaChanges(){
   if(state.changesLoading){
     return `<div class="panel"><p style="color:var(--muted);">Loading recent ETA changes…</p></div>`;
@@ -1087,7 +1098,7 @@ function renderEtaChanges(){
   const oldestBatch = batches[batches.length - 1];
   const newestBatch = batches[0];
   const activeSeverities = state.changesFilters.severity;
-  let rows = activeSeverities.length ? events.filter(e=>activeSeverities.includes(e.severity)) : events.slice();
+  let rows = filteredChangesEvents();
 
   const { col, dir } = state.changesSort;
   rows.sort((a,b)=>{
@@ -1109,7 +1120,10 @@ function renderEtaChanges(){
           (${new Date(oldestBatch.uploaded_at).toLocaleDateString()} – ${new Date(newestBatch.uploaded_at).toLocaleDateString()}).
           Only dates that moved <strong>later</strong> are shown — a date pulled in isn't flagged.
         </p>
-        <button type="button" class="btn secondary" id="refreshChangesBtn">Refresh</button>
+        <div style="display:flex;gap:8px;">
+          <button type="button" class="btn secondary" id="notifySalespeopleBtn">Notify Salespeople</button>
+          <button type="button" class="btn secondary" id="refreshChangesBtn">Refresh</button>
+        </div>
       </div>
       <div class="filter-row">
         <div class="filter-row-label">Severity</div>
@@ -1124,6 +1138,8 @@ function renderEtaChanges(){
           <th data-col="store">Store</th>
           <th data-col="supplier">Supplier</th>
           <th data-col="po_number">PO Number</th>
+          <th data-col="sales_person">Sales Person</th>
+          <th data-col="division">Division</th>
           <th data-col="old_date">Previous ETA</th>
           <th data-col="new_date">New ETA</th>
           <th data-col="delta_days">Days Pushed</th>
@@ -1136,16 +1152,164 @@ function renderEtaChanges(){
               <td>${r.store ?? '—'}</td>
               <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
               <td>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
+              <td>${r.sales_person || '—'}</td>
+              <td>${r.division || '—'}</td>
               <td>${fmtDate(r.old_date)}</td>
               <td>${fmtDate(r.new_date)}</td>
               <td>${r.delta_days}d</td>
               <td>${r.batch_date ? new Date(r.batch_date).toLocaleDateString() : '—'}</td>
             </tr>
-          `).join('') : `<tr><td colspan="8" class="empty">No qualifying ETA pushes in this window.</td></tr>`}
+          `).join('') : `<tr><td colspan="10" class="empty">No qualifying ETA pushes in this window.</td></tr>`}
         </tbody>
       </table>
     </div>
   `;
+}
+
+function titleCase(s){
+  return String(s||'').trim().toLowerCase().replace(/\b\w/g, c=>c.toUpperCase());
+}
+
+// Best-effort only - first token as first name, last token as last name. No directory
+// lookup exists for Sales Person, so this is a guess the user can correct in the modal
+// before opening each draft.
+function guessEmailFromName(name){
+  const parts = String(name||'').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if(!parts.length) return '';
+  if(parts.length === 1) return `${parts[0]}@afsgroup.com`;
+  return `${parts[0]}.${parts[parts.length-1]}@afsgroup.com`;
+}
+
+function groupChangesBySalesperson(events){
+  const groups = new Map();
+  events.forEach(e=>{
+    if(!e.sales_person) return;
+    if(!groups.has(e.sales_person)) groups.set(e.sales_person, []);
+    groups.get(e.sales_person).push(e);
+  });
+  return groups;
+}
+
+function buildNotifyEmailBody(name, list){
+  const sorted = list.slice().sort((a,b)=>b.delta_days - a.delta_days);
+  const firstName = titleCase(String(name||'').trim().split(/\s+/)[0] || name);
+  const lines = [
+    `Hi ${firstName},`,
+    '',
+    `The following ${sorted.length} PO${sorted.length===1?'':'s'} had their ETA pushed later on a recent upload:`,
+    ''
+  ];
+  sorted.forEach(e=>{
+    lines.push(`- PO ${e.po_number} (Store ${e.store ?? '—'}, ${e.supplier || 'Unknown supplier'}): ${fmtDate(e.old_date)} -> ${fmtDate(e.new_date)} (${e.delta_days}d, ${e.severity})`);
+  });
+  lines.push('', 'Let me know if you have questions.');
+  return lines.join('\n');
+}
+
+// Keeps the subject line readable when someone has a lot of changed POs.
+function subjectPoList(list){
+  const MAX = 5;
+  const nums = list.map(e=>e.po_number);
+  if(nums.length <= MAX) return nums.join(', ');
+  return nums.slice(0, MAX).join(', ') + ` +${nums.length - MAX} more`;
+}
+
+function openMailtoDraft(name, email, list){
+  const subject = `ETA update: PO${list.length===1?'':'s'} ${subjectPoList(list)} pushed later`;
+  const body = buildNotifyEmailBody(name, list);
+  const to = (email||'').trim();
+  window.location.href = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+function openNotifySalespeopleModal(){
+  const rows = filteredChangesEvents();
+  const groups = groupChangesBySalesperson(rows);
+  const namedCount = Array.from(groups.values()).reduce((sum,list)=>sum+list.length, 0);
+  const skipped = rows.length - namedCount;
+  const names = Array.from(groups.keys()).sort((a,b)=>a.localeCompare(b));
+
+  if(!names.length){
+    showModal(`
+      <h2>Notify Salespeople</h2>
+      <p style="color:var(--muted);font-size:13px;">None of the ${rows.length} change${rows.length===1?'':'s'} currently shown have a Salesperson on file, so there's nothing to draft.</p>
+    `);
+    return;
+  }
+
+  showModal(`
+    <h2>Notify Salespeople</h2>
+    <p style="color:var(--muted);font-size:13px;">
+      ${names.length} salesperson${names.length===1?'':'s'} across ${namedCount} change${namedCount===1?'':'s'} currently shown${skipped ? ` (${skipped} change${skipped===1?'':'s'} skipped — no Salesperson on file)` : ''}.
+      Email addresses are guessed as firstname.lastname@afsgroup.com — check each one before opening.
+    </p>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+      <label style="font-size:13px;"><input type="checkbox" id="notifySelectAll" checked> Select all</label>
+      <button type="button" class="btn" id="notifyOpenSelectedBtn">Open Selected Drafts (<span id="notifySelectedCount">${names.length}</span>)</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px;max-height:50vh;overflow-y:auto;">
+      ${names.map((name,i)=>{
+        const list = groups.get(name);
+        const inputId = 'notifyEmail_' + i;
+        const checkId = 'notifyCheck_' + i;
+        return `
+          <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+              <label style="display:flex;align-items:center;gap:6px;font-weight:700;">
+                <input type="checkbox" class="notify-person-checkbox" id="${checkId}" data-name="${escapeAttr(name)}" checked>
+                ${escapeAttr(titleCase(name))}
+              </label>
+              <span style="color:var(--muted);font-size:12.5px;">${list.length} PO${list.length===1?'':'s'}</span>
+            </div>
+            <input type="email" id="${inputId}" value="${escapeAttr(guessEmailFromName(name))}" style="width:100%;margin-top:6px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
+            <button type="button" class="btn secondary notify-draft-btn" data-name="${escapeAttr(name)}" data-input="${inputId}" style="margin-top:8px;">Open Draft</button>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `);
+
+  function updateSelectedCount(){
+    const checked = document.querySelectorAll('.notify-person-checkbox:checked').length;
+    const countEl = document.getElementById('notifySelectedCount');
+    if(countEl) countEl.textContent = checked;
+    const selectAll = document.getElementById('notifySelectAll');
+    if(selectAll){
+      selectAll.checked = checked === names.length;
+      selectAll.indeterminate = checked > 0 && checked < names.length;
+    }
+  }
+
+  document.getElementById('notifySelectAll')?.addEventListener('change', (e)=>{
+    document.querySelectorAll('.notify-person-checkbox').forEach(cb=>{ cb.checked = e.target.checked; });
+    updateSelectedCount();
+  });
+  document.querySelectorAll('.notify-person-checkbox').forEach(cb=>{
+    cb.addEventListener('change', updateSelectedCount);
+  });
+
+  document.querySelectorAll('.notify-draft-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const name = btn.dataset.name;
+      const email = document.getElementById(btn.dataset.input).value;
+      openMailtoDraft(name, email, groups.get(name));
+    });
+  });
+
+  document.getElementById('notifyOpenSelectedBtn')?.addEventListener('click', ()=>{
+    const selected = Array.from(document.querySelectorAll('.notify-person-checkbox:checked')).map(cb=>cb.dataset.name);
+    // Stagger so the OS mail client isn't asked to open several drafts in the same instant.
+    selected.forEach((name, i)=>{
+      setTimeout(()=>{
+        const btn = document.querySelector(`.notify-draft-btn[data-name="${cssEscape(name)}"]`);
+        const email = btn ? document.getElementById(btn.dataset.input).value : guessEmailFromName(name);
+        openMailtoDraft(name, email, groups.get(name));
+      }, i * 400);
+    });
+  });
+}
+
+function cssEscape(s){
+  return window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&');
 }
 
 // ============================================================
@@ -2055,6 +2219,7 @@ function attachViewHandlers(){
   }
 
   if(state.view === 'changes'){
+    document.getElementById('notifySalespeopleBtn')?.addEventListener('click', openNotifySalespeopleModal);
     document.getElementById('refreshChangesBtn')?.addEventListener('click', ()=>{
       state.changesData = null;
       loadEtaChangesAndRender();
