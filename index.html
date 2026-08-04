@@ -72,6 +72,9 @@
   .badge.b7{background:var(--warn-bg);color:var(--warn);}
   .badge.b14, .badge.b21, .badge.b28{background:var(--bad-bg);color:var(--bad);}
   .badge.blank{background:#eef0f4;color:var(--muted);}
+  .badge.sev-major{background:var(--bad-bg);color:var(--bad);}
+  .badge.sev-intermediate{background:var(--warn-bg);color:var(--warn);}
+  .badge.sev-slight{background:#eef1f6;color:var(--accent-dark);}
   .cell-good{background:var(--good-bg);color:var(--good);font-weight:700;}
   .cell-bad{background:var(--bad-bg);color:var(--bad);font-weight:700;}
   .cell-warn{background:var(--warn-bg);color:var(--warn);font-weight:700;}
@@ -109,6 +112,7 @@
     <button data-view="rollup" class="active">Manager Rollup</button>
     <button data-view="open">All Open POs</button>
     <button data-view="large">Large Orders</button>
+    <button data-view="changes">ETA Changes</button>
     <button data-view="upload" id="uploadTabBtn" class="hidden">Upload</button>
   </nav>
   <div id="identityBox" class="hidden" style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);">
@@ -215,7 +219,11 @@ const state = {
   stagedListingFile: null, // File objects held until both are ready - upload only runs once both are staged
   stagedSummaryFile: null,
   showAllRows: false, // All Open POs table caps at 500 rows until "Show All" is clicked
-  showAllSalesResults: false // same cap pattern for the Sales Data match-results table on Upload
+  showAllSalesResults: false, // same cap pattern for the Sales Data match-results table on Upload
+  changesData: null, // null until first loaded: { batches, events } - see loadEtaChanges()
+  changesLoading: false,
+  changesFilters: { severity: [] }, // multiselect, empty = all severities
+  changesSort: { col: 'delta_days', dir: 'desc' }
 };
 
 // ---------- identity ("who's using this" - a name-select for audit attribution, not a real login) ----------
@@ -329,6 +337,74 @@ async function loadLastBatch(){
   return (data && data[0]) || null;
 }
 
+// ---------- ETA changes (promise-date pushes across recent uploads) ----------
+// Severity is by how many days a promise_date moved LATER between two uploads.
+// Only pushes (new > old) count - a date pulled in is good news, not flagged.
+// Bands mirror the app's existing past-due bucket spacing.
+const CHANGES_WINDOW_BATCHES = 5;
+const SEVERITY_LABELS = { major: 'Major (28+ days)', intermediate: 'Intermediate (14-27 days)', slight: 'Slight (7-13 days)' };
+const SEVERITY_ORDER = ['major', 'intermediate', 'slight'];
+function severityOf(deltaDays){
+  if(deltaDays >= 28) return 'major';
+  if(deltaDays >= 14) return 'intermediate';
+  return 'slight'; // caller already filters out < 7
+}
+
+async function loadEtaChanges(){
+  const { data: batches, error: batchErr } = await sb.from('report_batches')
+    .select('*').order('uploaded_at', { ascending: false }).limit(CHANGES_WINDOW_BATCHES);
+  if(batchErr) throw batchErr;
+  if(!batches.length) return { batches: [], events: [] };
+
+  const batchIds = batches.map(b=>b.id);
+  let historyRows = [];
+  let from = 0;
+  const pageSize = 1000;
+  while(true){
+    const { data, error } = await sb.from('po_line_history')
+      .select('po_number,batch_id,event_type,changes,detected_at')
+      .in('batch_id', batchIds)
+      .in('event_type', ['updated', 'reappeared'])
+      .range(from, from + pageSize - 1);
+    if(error) throw error;
+    historyRows = historyRows.concat(data);
+    if(data.length < pageSize) break;
+    from += pageSize;
+  }
+
+  const batchById = new Map(batches.map(b=>[b.id, b]));
+  const poByNumber = new Map(state.poLines.map(r=>[r.po_number, r]));
+
+  const events = [];
+  historyRows.forEach(h=>{
+    if(!Array.isArray(h.changes)) return;
+    const pdChange = h.changes.find(c=>c.field === 'promise_date');
+    if(!pdChange || !pdChange.old || !pdChange.new) return; // no prior date to push FROM, nothing to measure
+    const oldD = parseDateStr(pdChange.old);
+    const newD = parseDateStr(pdChange.new);
+    if(!oldD || !newD) return;
+    const deltaDays = daysBetween(newD, oldD); // positive = pushed later
+    if(deltaDays < 7) return; // not a push, or below the Slight floor
+    const po = poByNumber.get(h.po_number);
+    const batch = batchById.get(h.batch_id);
+    events.push({
+      po_number: h.po_number,
+      supplier: po ? po.supplier : null,
+      store: po ? po.store : null,
+      is_active: po ? po.is_active : null,
+      old_date: pdChange.old,
+      new_date: pdChange.new,
+      delta_days: deltaDays,
+      severity: severityOf(deltaDays),
+      batch_id: h.batch_id,
+      batch_date: batch ? batch.uploaded_at : null,
+      batch_filename: batch ? batch.source_filename : null
+    });
+  });
+
+  return { batches, events };
+}
+
 async function loadAppSettings(){
   const { data, error } = await sb.from('app_settings').select('*').eq('id', true).single();
   if(error){ console.error(error); return { date_buffer_days: 0, last_received_upload_at: null, last_received_upload_filename: null }; }
@@ -369,11 +445,29 @@ async function refreshData(){
 }
 
 // ---------- nav ----------
+function loadEtaChangesAndRender(){
+  state.changesLoading = true;
+  render();
+  loadEtaChanges().then(data=>{
+    state.changesData = data;
+    state.changesLoading = false;
+    if(state.view === 'changes') render();
+  }).catch(err=>{
+    state.changesLoading = false;
+    state.changesData = { batches: [], events: [], error: err.message || String(err) };
+    if(state.view === 'changes') render();
+  });
+}
+
 document.getElementById('mainNav').addEventListener('click', (e)=>{
   const btn = e.target.closest('button[data-view]');
   if(!btn) return;
   state.view = btn.dataset.view;
   document.querySelectorAll('#mainNav button').forEach(b=>b.classList.toggle('active', b===btn));
+  if(state.view === 'changes' && !state.changesData && !state.changesLoading){
+    loadEtaChangesAndRender();
+    return;
+  }
   render();
 });
 
@@ -433,6 +527,7 @@ function render(){
   if(state.view === 'rollup') app.innerHTML = renderRollup();
   else if(state.view === 'open') app.innerHTML = renderOpenTable();
   else if(state.view === 'large') app.innerHTML = renderLargeOrders();
+  else if(state.view === 'changes') app.innerHTML = renderEtaChanges();
   else if(state.view === 'upload') app.innerHTML = renderUpload();
   attachViewHandlers();
 
@@ -958,6 +1053,95 @@ function renderLargeOrders(){
               <td>${r.po_number}</td>
             </tr>
           `).join('') : `<tr><td colspan="7" class="empty">No open POs at or above this quantity.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+// ============================================================
+// ETA CHANGES (promise-date pushes across recent uploads)
+// ============================================================
+function changesSeverityFacetCounts(events){
+  const counts = new Map();
+  events.forEach(e=>counts.set(e.severity, (counts.get(e.severity)||0) + 1));
+  return counts;
+}
+
+function renderEtaChanges(){
+  if(state.changesLoading){
+    return `<div class="panel"><p style="color:var(--muted);">Loading recent ETA changes…</p></div>`;
+  }
+  if(!state.changesData){
+    return `<div class="panel"><p style="color:var(--muted);">Switch back to this tab to load ETA changes.</p></div>`;
+  }
+  if(state.changesData.error){
+    return `<div class="panel"><p style="color:var(--bad);">Couldn't load ETA changes: ${escapeAttr(state.changesData.error)}</p></div>`;
+  }
+
+  const { batches, events } = state.changesData;
+  if(!batches.length){
+    return `<div class="panel"><p style="color:var(--muted);">No uploads found yet.</p></div>`;
+  }
+
+  const oldestBatch = batches[batches.length - 1];
+  const newestBatch = batches[0];
+  const activeSeverities = state.changesFilters.severity;
+  let rows = activeSeverities.length ? events.filter(e=>activeSeverities.includes(e.severity)) : events.slice();
+
+  const { col, dir } = state.changesSort;
+  rows.sort((a,b)=>{
+    let av = a[col], bv = b[col];
+    if(av === null || av === undefined) av = '';
+    if(bv === null || bv === undefined) bv = '';
+    if(av < bv) return dir === 'asc' ? -1 : 1;
+    if(av > bv) return dir === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  const counts = changesSeverityFacetCounts(events);
+
+  return `
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:4px;">
+        <p style="color:var(--muted);font-size:13px;margin:0;max-width:640px;">
+          Promise-date pushes of 7+ days across the last ${batches.length} upload${batches.length===1?'':'s'}
+          (${new Date(oldestBatch.uploaded_at).toLocaleDateString()} – ${new Date(newestBatch.uploaded_at).toLocaleDateString()}).
+          Only dates that moved <strong>later</strong> are shown — a date pulled in isn't flagged.
+        </p>
+        <button type="button" class="btn secondary" id="refreshChangesBtn">Refresh</button>
+      </div>
+      <div class="filter-row">
+        <div class="filter-row-label">Severity</div>
+        <div class="filter-cards">
+          <button type="button" class="filter-card changes-filter-card ${!activeSeverities.length?'active':''}" data-value="">All <span class="count">${events.length}</span></button>
+          ${SEVERITY_ORDER.map(sev=>`<button type="button" class="filter-card changes-filter-card ${activeSeverities.includes(sev)?'active':''}" data-value="${sev}">${SEVERITY_LABELS[sev]} <span class="count">${counts.get(sev)||0}</span></button>`).join('')}
+        </div>
+      </div>
+      <table>
+        <thead><tr>
+          <th data-col="severity">Severity</th>
+          <th data-col="store">Store</th>
+          <th data-col="supplier">Supplier</th>
+          <th data-col="po_number">PO Number</th>
+          <th data-col="old_date">Previous ETA</th>
+          <th data-col="new_date">New ETA</th>
+          <th data-col="delta_days">Days Pushed</th>
+          <th data-col="batch_date">Upload Date</th>
+        </tr></thead>
+        <tbody>
+          ${rows.length ? rows.map(r=>`
+            <tr class="po-row" data-po="${r.po_number}">
+              <td><span class="badge sev-${r.severity}">${r.severity.charAt(0).toUpperCase()+r.severity.slice(1)}</span></td>
+              <td>${r.store ?? '—'}</td>
+              <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
+              <td>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
+              <td>${fmtDate(r.old_date)}</td>
+              <td>${fmtDate(r.new_date)}</td>
+              <td>${r.delta_days}d</td>
+              <td>${r.batch_date ? new Date(r.batch_date).toLocaleDateString() : '—'}</td>
+            </tr>
+          `).join('') : `<tr><td colspan="8" class="empty">No qualifying ETA pushes in this window.</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -1865,6 +2049,27 @@ function attachViewHandlers(){
         const col = th.dataset.col;
         if(state.sort.col === col) state.sort.dir = state.sort.dir==='asc' ? 'desc' : 'asc';
         else { state.sort.col = col; state.sort.dir = 'asc'; }
+        render();
+      });
+    });
+  }
+
+  if(state.view === 'changes'){
+    document.getElementById('refreshChangesBtn')?.addEventListener('click', ()=>{
+      state.changesData = null;
+      loadEtaChangesAndRender();
+    });
+    document.querySelectorAll('.changes-filter-card').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        toggleFilterValue(state.changesFilters, 'severity', btn.dataset.value);
+        render();
+      });
+    });
+    document.querySelectorAll('th[data-col]').forEach(th=>{
+      th.addEventListener('click', ()=>{
+        const col = th.dataset.col;
+        if(state.changesSort.col === col) state.changesSort.dir = state.changesSort.dir==='asc' ? 'desc' : 'asc';
+        else { state.changesSort.col = col; state.changesSort.dir = 'asc'; }
         render();
       });
     });
