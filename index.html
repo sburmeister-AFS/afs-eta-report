@@ -1249,10 +1249,8 @@ function openMailtoDraft(name, email, list){
   const body = buildNotifyEmailBody(name, list);
   const to = (email||'').trim();
   const mailtoUrl = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  // Repeatedly assigning location.href only ever honors one mailto hand-off, and browsers
-  // only allow multiple external-app triggers within the SAME synchronous user gesture -
-  // window.open() per draft, called synchronously (no setTimeout), keeps every one inside
-  // that gesture so the mail client opens for each selected person, not just the first.
+  // window.open (not repeated location.href) so the mail app launch is tied to this call's
+  // own user gesture rather than clobbering/reusing the previous navigation's.
   const win = window.open(mailtoUrl, '_blank');
   if(win) setTimeout(()=>{ try{ win.close(); }catch(e){} }, 500); // mailto leaves a blank tab in some browsers
 }
@@ -1288,13 +1286,13 @@ function openNotifySalespeopleModal(){
         const inputId = 'notifyEmail_' + i;
         const checkId = 'notifyCheck_' + i;
         return `
-          <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;">
+          <div class="notify-person-row" data-name="${escapeAttr(name)}" style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;">
             <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
               <label style="display:flex;align-items:center;gap:6px;font-weight:700;">
                 <input type="checkbox" class="notify-person-checkbox" id="${checkId}" data-name="${escapeAttr(name)}" checked>
                 ${escapeAttr(titleCase(name))}
               </label>
-              <span style="color:var(--muted);font-size:12.5px;">${list.length} PO${list.length===1?'':'s'}</span>
+              <span style="color:var(--muted);font-size:12.5px;" class="notify-person-status">${list.length} PO${list.length===1?'':'s'}</span>
             </div>
             <input type="email" id="${inputId}" value="${escapeAttr(guessEmailFromName(name))}" style="width:100%;margin-top:6px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
             <button type="button" class="btn secondary notify-draft-btn" data-name="${escapeAttr(name)}" data-input="${inputId}" style="margin-top:8px;">Open Draft</button>
@@ -1323,25 +1321,49 @@ function openNotifySalespeopleModal(){
     cb.addEventListener('change', updateSelectedCount);
   });
 
+  function markOpened(name){
+    const row = document.querySelector(`.notify-person-row[data-name="${cssEscape(name)}"]`);
+    const status = row?.querySelector('.notify-person-status');
+    if(status) status.textContent = 'Opened ✓';
+  }
+
   document.querySelectorAll('.notify-draft-btn').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       const name = btn.dataset.name;
       const email = document.getElementById(btn.dataset.input).value;
       openMailtoDraft(name, email, groups.get(name));
+      markOpened(name);
     });
   });
 
-  document.getElementById('notifyOpenSelectedBtn')?.addEventListener('click', ()=>{
-    const selected = Array.from(document.querySelectorAll('.notify-person-checkbox:checked')).map(cb=>cb.dataset.name);
-    // Every draft must open synchronously, in this same click handler - browsers only allow
-    // multiple external-app triggers (mailto, popups) within the direct user-gesture window;
-    // deferring any of them (setTimeout, promises) drops them out of that window and gets
-    // silently blocked after the first.
-    selected.forEach(name=>{
+  // Launching a mail app (mailto:) is more restricted than opening a browser popup: Windows/the
+  // browser only allow ONE external-app launch per real user click, no matter how the code fires
+  // it - looping through several in one handler silently drops every one after the first. So
+  // instead of trying to open them all at once, this button opens ONE draft per click and
+  // relabels itself "Open Next Draft" until every selected person has been opened - each click is
+  // its own genuine user gesture, so each one is allowed through.
+  let notifyQueue = null;
+  const openSelectedBtn = document.getElementById('notifyOpenSelectedBtn');
+  openSelectedBtn?.addEventListener('click', ()=>{
+    if(!notifyQueue || notifyQueue.index >= notifyQueue.names.length){
+      const selected = Array.from(document.querySelectorAll('.notify-person-checkbox:checked')).map(cb=>cb.dataset.name);
+      notifyQueue = { names: selected, index: 0 };
+    }
+    const name = notifyQueue.names[notifyQueue.index];
+    if(name){
       const btn = document.querySelector(`.notify-draft-btn[data-name="${cssEscape(name)}"]`);
       const email = btn ? document.getElementById(btn.dataset.input).value : guessEmailFromName(name);
       openMailtoDraft(name, email, groups.get(name));
-    });
+      markOpened(name);
+      notifyQueue.index++;
+    }
+    if(notifyQueue.index < notifyQueue.names.length){
+      openSelectedBtn.textContent = `Open Next Draft (${notifyQueue.index+1} of ${notifyQueue.names.length})`;
+    } else {
+      notifyQueue = null;
+      openSelectedBtn.textContent = 'All opened ✓';
+      openSelectedBtn.disabled = true;
+    }
   });
 }
 
