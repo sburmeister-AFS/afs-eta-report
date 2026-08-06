@@ -76,6 +76,11 @@
   .badge.sev-intermediate{background:var(--warn-bg);color:var(--warn);}
   .badge.sev-slight{background:#eef1f6;color:var(--accent-dark);}
   .badge.sev-new{background:#e3ecfd;color:var(--accent-dark);}
+  .badge.grade-a{background:var(--good-bg);color:var(--good);}
+  .badge.grade-b{background:#e3ecfd;color:var(--accent-dark);}
+  .badge.grade-c{background:#eef0f4;color:var(--muted);}
+  .badge.grade-d{background:var(--warn-bg);color:var(--warn);}
+  .badge.grade-f{background:var(--bad-bg);color:var(--bad);}
   .cell-good{background:var(--good-bg);color:var(--good);font-weight:700;}
   .cell-bad{background:var(--bad-bg);color:var(--bad);font-weight:700;}
   .cell-warn{background:var(--warn-bg);color:var(--warn);font-weight:700;}
@@ -114,6 +119,7 @@
     <button data-view="open">All Open POs</button>
     <button data-view="large">Large Orders</button>
     <button data-view="changes">ETA Changes</button>
+    <button data-view="vendors">Vendor Scorecard</button>
     <button data-view="upload" id="uploadTabBtn" class="hidden">Upload</button>
   </nav>
   <div id="identityBox" class="hidden" style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);">
@@ -224,7 +230,10 @@ const state = {
   changesData: null, // null until first loaded: { batches, events } - see loadEtaChanges()
   changesLoading: false,
   changesFilters: { severity: [] }, // multiselect, empty = all severities
-  changesSort: { col: 'delta_days', dir: 'desc' }
+  changesSort: { col: 'delta_days', dir: 'desc' },
+  vendorScorecardData: null, // null until first loaded: { rows, computedAt } - see computeVendorScorecard()
+  vendorScorecardLoading: false,
+  vendorScorecardSort: { col: 'score', dir: 'desc' }
 };
 
 // ---------- identity ("who's using this" - a name-select for audit attribution, not a real login) ----------
@@ -433,6 +442,119 @@ async function loadEtaChanges(){
   return { batches, events };
 }
 
+// ---------- Vendor Scorecard ----------
+// A grade per vendor (po_lines.supplier) blending two automatic signals:
+//   - On-time %: of closed POs with real evidence of delivery (some qty actually received,
+//     so a silent cancellation doesn't count as "late"), did the PO close on/before its final
+//     promise date?
+//   - Push-back-free %: of all POs (open or closed), what share never had their promise date
+//     pushed 7+ days later - the same threshold the ETA Changes tab uses for a real push vs. noise.
+// Vendors with few POs on file have their score pulled toward a neutral C so a single early
+// order can't swing them to an A+ or an F - see VENDOR_SCORE_FULL_CONFIDENCE_POS below.
+const VENDOR_SCORE_PUSHBACK_THRESHOLD_DAYS = 7;
+const VENDOR_SCORE_FULL_CONFIDENCE_POS = 20; // POs on file needed before a vendor's score counts fully
+const VENDOR_SCORE_NEUTRAL = 75; // where a no-data / low-confidence vendor's score sits (a C)
+const VENDOR_GRADE_BANDS = [ [90,'a'], [80,'b'], [70,'c'], [60,'d'], [-Infinity,'f'] ];
+function vendorGradeOf(score){
+  return VENDOR_GRADE_BANDS.find(([min])=>score >= min)[1];
+}
+
+async function computeVendorScorecard(){
+  let historyRows = [];
+  let from = 0;
+  const pageSize = 1000;
+  while(true){
+    const { data, error } = await sb.from('po_line_history')
+      .select('po_number,event_type,changes,detected_at')
+      .in('event_type', ['updated', 'reappeared', 'manual_update', 'unverified_update', 'closed'])
+      .range(from, from + pageSize - 1);
+    if(error) throw error;
+    historyRows = historyRows.concat(data);
+    if(data.length < pageSize) break;
+    from += pageSize;
+  }
+
+  const lastClosedAt = new Map(); // po_number -> latest 'closed' detected_at seen
+  const pushedBack = new Set(); // po_number with at least one qualifying promise_date push
+  historyRows.forEach(h=>{
+    if(h.event_type === 'closed'){
+      const prior = lastClosedAt.get(h.po_number);
+      if(!prior || h.detected_at > prior) lastClosedAt.set(h.po_number, h.detected_at);
+      return;
+    }
+    if(!Array.isArray(h.changes)) return;
+    const pdChange = h.changes.find(c=>c.field === 'promise_date');
+    if(!pdChange || !pdChange.old || !pdChange.new) return;
+    const oldD = parseDateStr(pdChange.old);
+    const newD = parseDateStr(pdChange.new);
+    if(!oldD || !newD) return;
+    if(daysBetween(newD, oldD) >= VENDOR_SCORE_PUSHBACK_THRESHOLD_DAYS) pushedBack.add(h.po_number);
+  });
+
+  const groups = new Map(); // supplier (or '(No Vendor Listed)') -> po_lines rows
+  state.poLines.forEach(row=>{
+    const key = row.supplier || '(No Vendor Listed)';
+    if(!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  });
+
+  const rows = [];
+  groups.forEach((lines, vendor)=>{
+    const totalPOs = lines.length;
+    const openPOs = lines.filter(r=>r.is_active).length;
+    const totalSpend = lines.reduce((s,r)=>s+(Number(r.total_cost)||0), 0);
+
+    const deliveredClosed = lines.filter(r=>!r.is_active && receivedStatusOf(r) !== 'none');
+    let onTimeCount = 0, onTimeEligible = 0;
+    deliveredClosed.forEach(r=>{
+      const closedAt = lastClosedAt.get(r.po_number);
+      if(!closedAt || !r.promise_date) return;
+      const closedDate = parseDateStr(closedAt.slice(0,10));
+      const promiseDate = parseDateStr(r.promise_date);
+      if(!closedDate || !promiseDate) return;
+      onTimeEligible++;
+      if(daysBetween(closedDate, promiseDate) <= 0) onTimeCount++;
+    });
+    const onTimePct = onTimeEligible ? (onTimeCount / onTimeEligible * 100) : null;
+
+    const pushbackFreeCount = lines.filter(r=>!pushedBack.has(r.po_number)).length;
+    const pushbackFreePct = totalPOs ? (pushbackFreeCount / totalPOs * 100) : null;
+
+    // Each sub-score is shrunk toward neutral by ITS OWN sample size, not the vendor's overall PO
+    // count - onTimeEligible (closed + confirmed-received + dated POs) is often far smaller than
+    // totalPOs, and a vendor with hundreds of open POs but only 1 confirmed-late closed one
+    // shouldn't get graded at full confidence off that single data point.
+    const onTimeWeight = Math.min(1, onTimeEligible / VENDOR_SCORE_FULL_CONFIDENCE_POS);
+    const pushbackWeight = Math.min(1, totalPOs / VENDOR_SCORE_FULL_CONFIDENCE_POS);
+    const adjustedOnTime = onTimeWeight * (onTimePct ?? VENDOR_SCORE_NEUTRAL) + (1 - onTimeWeight) * VENDOR_SCORE_NEUTRAL;
+    const adjustedPushback = pushbackWeight * (pushbackFreePct ?? VENDOR_SCORE_NEUTRAL) + (1 - pushbackWeight) * VENDOR_SCORE_NEUTRAL;
+    const score = 0.5 * adjustedOnTime + 0.5 * adjustedPushback;
+
+    rows.push({
+      vendor, totalPOs, openPOs, totalSpend,
+      onTimePct, onTimeEligible, pushbackFreePct,
+      score, grade: vendorGradeOf(score),
+      lowConfidence: onTimeWeight < 1 || pushbackWeight < 1
+    });
+  });
+
+  return rows;
+}
+
+function loadVendorScorecardAndRender(){
+  state.vendorScorecardLoading = true;
+  render();
+  computeVendorScorecard().then(rows=>{
+    state.vendorScorecardData = { rows, computedAt: new Date().toISOString() };
+    state.vendorScorecardLoading = false;
+    if(state.view === 'vendors') render();
+  }).catch(err=>{
+    state.vendorScorecardLoading = false;
+    state.vendorScorecardData = { rows: [], error: err.message || String(err) };
+    if(state.view === 'vendors') render();
+  });
+}
+
 async function loadAppSettings(){
   const { data, error } = await sb.from('app_settings').select('*').eq('id', true).single();
   if(error){ console.error(error); return { date_buffer_days: 0, last_received_upload_at: null, last_received_upload_filename: null }; }
@@ -496,6 +618,10 @@ document.getElementById('mainNav').addEventListener('click', (e)=>{
     loadEtaChangesAndRender();
     return;
   }
+  if(state.view === 'vendors' && !state.vendorScorecardData && !state.vendorScorecardLoading){
+    loadVendorScorecardAndRender();
+    return;
+  }
   render();
 });
 
@@ -556,6 +682,7 @@ function render(){
   else if(state.view === 'open') app.innerHTML = renderOpenTable();
   else if(state.view === 'large') app.innerHTML = renderLargeOrders();
   else if(state.view === 'changes') app.innerHTML = renderEtaChanges();
+  else if(state.view === 'vendors') app.innerHTML = renderVendorScorecard();
   else if(state.view === 'upload') app.innerHTML = renderUpload();
   attachViewHandlers();
 
@@ -1187,6 +1314,70 @@ function renderEtaChanges(){
               <td>${r.batch_date ? new Date(r.batch_date).toLocaleDateString() : '—'}</td>
             </tr>
           `).join('') : `<tr><td colspan="10" class="empty">No qualifying ETA pushes in this window.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderVendorScorecard(){
+  if(state.vendorScorecardLoading){
+    return `<div class="panel"><p style="color:var(--muted);">Computing vendor scores…</p></div>`;
+  }
+  if(!state.vendorScorecardData){
+    return `<div class="panel"><p style="color:var(--muted);">Switch back to this tab to load the vendor scorecard.</p></div>`;
+  }
+  if(state.vendorScorecardData.error){
+    return `<div class="panel"><p style="color:var(--bad);">Couldn't load vendor scorecard: ${escapeAttr(state.vendorScorecardData.error)}</p></div>`;
+  }
+
+  const rows = state.vendorScorecardData.rows.slice();
+  const { col, dir } = state.vendorScorecardSort;
+  rows.sort((a,b)=>{
+    let av = a[col], bv = b[col];
+    if(av === null || av === undefined) av = -Infinity;
+    if(bv === null || bv === undefined) bv = -Infinity;
+    if(av < bv) return dir === 'asc' ? -1 : 1;
+    if(av > bv) return dir === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  return `
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:4px;">
+        <p style="color:var(--muted);font-size:13px;margin:0;max-width:680px;">
+          Grade blends On-Time % and Push-back-Free % evenly. On-Time only counts closed POs with
+          real evidence of delivery (some qty actually received), so a canceled order isn't scored
+          as "late." Vendors with fewer than ${VENDOR_SCORE_FULL_CONFIDENCE_POS} POs on file have their
+          grade pulled toward a neutral C (marked <span class="badge blank">low sample</span>) so one
+          early order can't swing them to an A+ or an F.
+        </p>
+        <button type="button" class="btn secondary" id="refreshVendorScorecardBtn">Refresh</button>
+      </div>
+      <table>
+        <thead><tr>
+          <th data-col="vendor">Vendor</th>
+          <th data-col="grade">Grade</th>
+          <th data-col="score">Score</th>
+          <th data-col="onTimePct">On-Time %</th>
+          <th data-col="pushbackFreePct">Push-back-Free %</th>
+          <th data-col="totalPOs">Total POs</th>
+          <th data-col="openPOs">Open POs</th>
+          <th data-col="totalSpend">Total $ Spend</th>
+        </tr></thead>
+        <tbody>
+          ${rows.length ? rows.map(r=>`
+            <tr>
+              <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.vendor)}">${escapeAttr(r.vendor)}${r.lowConfidence ? ' <span class="badge blank">low sample</span>' : ''}</td>
+              <td><span class="badge grade-${r.grade}">${r.grade.toUpperCase()}</span></td>
+              <td>${r.score.toFixed(0)}</td>
+              <td>${r.onTimePct === null ? '—' : r.onTimePct.toFixed(0)+'%'} <span style="color:var(--muted);font-size:11.5px;">(${r.onTimeEligible})</span></td>
+              <td>${r.pushbackFreePct === null ? '—' : r.pushbackFreePct.toFixed(0)+'%'}</td>
+              <td>${r.totalPOs.toLocaleString()}</td>
+              <td>${r.openPOs.toLocaleString()}</td>
+              <td>${fmtMoney(r.totalSpend)}</td>
+            </tr>
+          `).join('') : `<tr><td colspan="8" class="empty">No vendor data yet.</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -2294,6 +2485,21 @@ function attachViewHandlers(){
         const col = th.dataset.col;
         if(state.changesSort.col === col) state.changesSort.dir = state.changesSort.dir==='asc' ? 'desc' : 'asc';
         else { state.changesSort.col = col; state.changesSort.dir = 'asc'; }
+        render();
+      });
+    });
+  }
+
+  if(state.view === 'vendors'){
+    document.getElementById('refreshVendorScorecardBtn')?.addEventListener('click', ()=>{
+      state.vendorScorecardData = null;
+      loadVendorScorecardAndRender();
+    });
+    document.querySelectorAll('th[data-col]').forEach(th=>{
+      th.addEventListener('click', ()=>{
+        const col = th.dataset.col;
+        if(state.vendorScorecardSort.col === col) state.vendorScorecardSort.dir = state.vendorScorecardSort.dir==='asc' ? 'desc' : 'asc';
+        else { state.vendorScorecardSort.col = col; state.vendorScorecardSort.dir = 'desc'; }
         render();
       });
     });
