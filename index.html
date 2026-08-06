@@ -1344,6 +1344,9 @@ function renderVendorScorecard(){
 
   return `
     <div class="panel">
+      <div style="background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn);border-radius:8px;padding:8px 12px;font-size:13px;font-weight:700;margin-bottom:12px;">
+        🧪 Beta — this scorecard is still being tested. Grades may change as the formula is tuned; don't treat them as final yet.
+      </div>
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:4px;">
         <p style="color:var(--muted);font-size:13px;margin:0;max-width:680px;">
           Grade blends On-Time % and Push-back-Free % evenly. On-Time only counts closed POs with
