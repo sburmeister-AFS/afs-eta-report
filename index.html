@@ -1248,7 +1248,13 @@ function openMailtoDraft(name, email, list){
   const subject = `ETA update: PO${list.length===1?'':'s'} ${subjectPoList(list)} pushed later`;
   const body = buildNotifyEmailBody(name, list);
   const to = (email||'').trim();
-  window.location.href = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const mailtoUrl = `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  // Repeatedly assigning location.href only ever honors one mailto hand-off, and browsers
+  // only allow multiple external-app triggers within the SAME synchronous user gesture -
+  // window.open() per draft, called synchronously (no setTimeout), keeps every one inside
+  // that gesture so the mail client opens for each selected person, not just the first.
+  const win = window.open(mailtoUrl, '_blank');
+  if(win) setTimeout(()=>{ try{ win.close(); }catch(e){} }, 500); // mailto leaves a blank tab in some browsers
 }
 
 function openNotifySalespeopleModal(){
@@ -1327,13 +1333,14 @@ function openNotifySalespeopleModal(){
 
   document.getElementById('notifyOpenSelectedBtn')?.addEventListener('click', ()=>{
     const selected = Array.from(document.querySelectorAll('.notify-person-checkbox:checked')).map(cb=>cb.dataset.name);
-    // Stagger so the OS mail client isn't asked to open several drafts in the same instant.
-    selected.forEach((name, i)=>{
-      setTimeout(()=>{
-        const btn = document.querySelector(`.notify-draft-btn[data-name="${cssEscape(name)}"]`);
-        const email = btn ? document.getElementById(btn.dataset.input).value : guessEmailFromName(name);
-        openMailtoDraft(name, email, groups.get(name));
-      }, i * 400);
+    // Every draft must open synchronously, in this same click handler - browsers only allow
+    // multiple external-app triggers (mailto, popups) within the direct user-gesture window;
+    // deferring any of them (setTimeout, promises) drops them out of that window and gets
+    // silently blocked after the first.
+    selected.forEach(name=>{
+      const btn = document.querySelector(`.notify-draft-btn[data-name="${cssEscape(name)}"]`);
+      const email = btn ? document.getElementById(btn.dataset.input).value : guessEmailFromName(name);
+      openMailtoDraft(name, email, groups.get(name));
     });
   });
 }
