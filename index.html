@@ -749,7 +749,7 @@ function render(){
 // ============================================================
 // SCORECARD (composite of the Total row, weighted by IMPORTANCE)
 // ============================================================
-function renderScorecard(totals, totalAll, goals){
+function renderScorecard(totals, totalAll, goals, poCounts){
   let composite = 0;
   const rowsHtml = BUCKET_ORDER.map(b=>{
     const actualPct = totalAll ? totals[b] / totalAll : 0;
@@ -763,7 +763,7 @@ function renderScorecard(totals, totalAll, goals){
     return `<tr>
       <td>${BUCKET_LABELS[b]}</td>
       <td>${goalDisplay}</td>
-      <td>${(actualPct*100).toFixed(1)}%</td>
+      <td title="${(poCounts[b]||0).toLocaleString()} PO${poCounts[b]===1?'':'s'}">${(actualPct*100).toFixed(2)}%</td>
       <td class="${scoreCls}">${(score*100).toFixed(0)}%</td>
       <td class="${impCls}">${(importance*100).toFixed(0)}%</td>
     </tr>`;
@@ -814,9 +814,11 @@ function renderRollup(){
     g[bucket] += val;
   }
   const totals = { current:0, b7:0, b14:0, b21:0, b28:0, blank:0 };
+  const poCounts = { current:0, b7:0, b14:0, b21:0, b28:0, blank:0 }; // raw PO count per bucket, independent of the Dollars/Count metric toggle
   active.forEach(row=>{
     const bucket = bucketOf(row);
     totals[bucket] += state.rollupMetric === 'dollars' ? (Number(row.total_cost)||0) : 1;
+    poCounts[bucket]++;
   });
 
   const goals = GOALS[state.rollupMetric];
@@ -839,7 +841,7 @@ function renderRollup(){
       <div class="stat"><div class="num">${active.length.toLocaleString()}</div><div class="label">Open POs</div></div>
       <div class="stat"><div class="num">${fmtMoney(active.reduce((s,r)=>s+(Number(r.total_cost)||0),0))}</div><div class="label">Total $ Open</div></div>
     </div>
-    ${renderScorecard(totals, totalAll, goals)}
+    ${renderScorecard(totals, totalAll, goals, poCounts)}
     <div class="panel">
       <div class="toolbar">
         <span style="font-weight:700;">Metric:</span>
