@@ -2842,6 +2842,8 @@ async function savePromiseUpdate(poNumber){
       if(histErr) throw histErr;
       row.pending_promise_date = newDate;
     }
+    // a promise-date edit here can change the vendor scorecard's push-back calc, so drop the cache
+    state.vendorScorecardData = null;
     closeModal();
     render();
   } catch(err){
