@@ -113,6 +113,7 @@
     <button data-view="rollup" class="active">Manager Rollup</button>
     <button data-view="open">All Open POs</button>
     <button data-view="large">Large Orders</button>
+    <button data-view="genpo">Outstanding Gen PO</button>
     <button data-view="changes">ETA Changes</button>
     <button data-view="upload" id="uploadTabBtn" class="hidden">Upload</button>
   </nav>
@@ -189,6 +190,12 @@ const PRODUCT_CODES = {
   '86':'COUNTERTOP LABOR', '87':'TURF LABOR', '88':'CLOSET LABOR', '89':'BATH & MIRROR LABOR',
   '96':'SAMPLES', '97':'PRE & POST INSPECT', '98':'LABOR % BILLING'
 };
+// Gen PO Lines stores PC as a plain integer (1, 6, 22...) rather than the zero-padded
+// string ('01', '06', '22') the PRODUCT_CODES map above is keyed by.
+function pcLabel(pc){
+  if(pc===null || pc===undefined) return '—';
+  return productCodeLabel(String(pc).padStart(2,'0'));
+}
 function productCodeLabel(code){
   if(!code) return '—';
   const name = PRODUCT_CODES[code];
@@ -224,7 +231,16 @@ const state = {
   changesData: null, // null until first loaded: { batches, events } - see loadEtaChanges()
   changesLoading: false,
   changesFilters: { severity: [] }, // multiselect, empty = all severities
-  changesSort: { col: 'delta_days', dir: 'desc' }
+  changesSort: { col: 'delta_days', dir: 'desc' },
+  // ---------- Outstanding Gen PO Lines (separate table/history from po_lines above) ----------
+  genPoLines: [],
+  lastGenPoBatch: null,
+  genPoFilters: { supplier: [], pc: [], holdType: [], stockOnly: '', search: '', activeOnly: true, hideNewToday: true },
+  genPoSort: { col: 'days_outstanding', dir: 'desc' },
+  showAllGenPoRows: false,
+  stagedGenPoFile: null, // File object, staged while its sheet is being detected/parsed
+  stagedGenPoPreview: null, // { sheetName, rowCount, dataRows } once parsing succeeds
+  genPoStageError: null
 };
 
 // ---------- identity ("who's using this" - a name-select for audit attribution, not a real login) ----------
@@ -333,7 +349,27 @@ async function loadAll(){
 }
 
 async function loadLastBatch(){
-  const { data, error } = await sb.from('report_batches').select('*').order('uploaded_at', { ascending:false }).limit(1);
+  const { data, error } = await sb.from('report_batches').select('*').eq('report_type', 'po_listing').order('uploaded_at', { ascending:false }).limit(1);
+  if(error) throw error;
+  return (data && data[0]) || null;
+}
+
+async function loadAllGenPo(){
+  let all = [];
+  let from = 0;
+  const pageSize = 1000;
+  while(true){
+    const { data, error } = await sb.from('gen_po_lines').select('*').range(from, from + pageSize - 1);
+    if(error) throw error;
+    all = all.concat(data);
+    if(data.length < pageSize) break;
+    from += pageSize;
+  }
+  return all;
+}
+
+async function loadLastGenPoBatch(){
+  const { data, error } = await sb.from('report_batches').select('*').eq('report_type', 'gen_po').order('uploaded_at', { ascending:false }).limit(1);
   if(error) throw error;
   return (data && data[0]) || null;
 }
@@ -354,7 +390,7 @@ function severityOf(deltaDays){
 
 async function loadEtaChanges(){
   const { data: batches, error: batchErr } = await sb.from('report_batches')
-    .select('*').order('uploaded_at', { ascending: false }).limit(CHANGES_WINDOW_BATCHES);
+    .select('*').eq('report_type', 'po_listing').order('uploaded_at', { ascending: false }).limit(CHANGES_WINDOW_BATCHES);
   if(batchErr) throw batchErr;
   if(!batches.length) return { batches: [], events: [] };
 
@@ -457,7 +493,7 @@ async function saveLastSalesUpload(filename){
 
 async function refreshData(){
   document.getElementById('lastUpdated').textContent = 'Loading…';
-  const [lines, batch, settings] = await Promise.all([loadAll(), loadLastBatch(), loadAppSettings()]);
+  const [lines, batch, settings, genPoLines, genPoBatch] = await Promise.all([loadAll(), loadLastBatch(), loadAppSettings(), loadAllGenPo(), loadLastGenPoBatch()]);
   state.poLines = lines;
   state.lastBatch = batch;
   state.dateBufferDays = settings.date_buffer_days || 0;
@@ -465,6 +501,8 @@ async function refreshData(){
   state.lastReceivedUploadFilename = settings.last_received_upload_filename || null;
   state.lastSalesUploadAt = settings.last_sales_upload_at || null;
   state.lastSalesUploadFilename = settings.last_sales_upload_filename || null;
+  state.genPoLines = genPoLines;
+  state.lastGenPoBatch = genPoBatch;
   state.loadedAt = new Date();
   document.getElementById('lastUpdated').textContent = batch
     ? `Last upload: ${new Date(batch.uploaded_at).toLocaleString()} · ${batch.row_count} open POs`
@@ -555,6 +593,7 @@ function render(){
   if(state.view === 'rollup') app.innerHTML = renderRollup();
   else if(state.view === 'open') app.innerHTML = renderOpenTable();
   else if(state.view === 'large') app.innerHTML = renderLargeOrders();
+  else if(state.view === 'genpo') app.innerHTML = renderGenPo();
   else if(state.view === 'changes') app.innerHTML = renderEtaChanges();
   else if(state.view === 'upload') app.innerHTML = renderUpload();
   attachViewHandlers();
@@ -1088,6 +1127,286 @@ function renderLargeOrders(){
 }
 
 // ============================================================
+// OUTSTANDING GEN PO LINES
+// ============================================================
+function genPoDaysOutstanding(r){
+  if(!r.first_seen_at) return null;
+  const d = new Date(r.first_seen_at);
+  d.setHours(0,0,0,0);
+  return daysBetween(todayLocalMidnight(), d);
+}
+function genPoAgeBucket(days){
+  if(days === null) return 'blank';
+  if(days <= 6) return 'current';
+  if(days <= 13) return 'b7';
+  if(days <= 27) return 'b14';
+  return 'b21';
+}
+
+function matchesGenPoFilters(r, filters, excludeDim){
+  if(filters.activeOnly && !r.is_active) return false;
+  // The report's whole purpose is spotting lines that persist across uploads, not lines that
+  // just showed up today - hide those by default (days_outstanding is null only if
+  // first_seen_at is somehow missing, which shouldn't happen, so don't treat null as "new").
+  if(filters.hideNewToday && genPoDaysOutstanding(r) === 0) return false;
+  if(excludeDim!=='supplier' && filters.supplier.length && !filters.supplier.includes(r.supplier)) return false;
+  if(excludeDim!=='pc' && filters.pc.length && !filters.pc.includes(String(r.pc))) return false;
+  if(excludeDim!=='holdType' && filters.holdType.length && !filters.holdType.includes(r.hold_type || '(none)')) return false;
+  if(filters.stockOnly === 'stock' && !r.is_stock_item) return false;
+  if(filters.stockOnly === 'nonstock' && r.is_stock_item) return false;
+  if(filters.search){
+    const s = filters.search.toLowerCase();
+    const hit = (r.order_number||'').toLowerCase().includes(s) || (r.style_item||'').toLowerCase().includes(s)
+      || (r.job_number||'').toLowerCase().includes(s) || (r.supplier||'').toLowerCase().includes(s) || (r.sku||'').toLowerCase().includes(s);
+    if(!hit) return false;
+  }
+  return true;
+}
+function filterGenPoRows(filters){ return state.genPoLines.filter(r=>matchesGenPoFilters(r, filters, null)); }
+
+function genPoSupplierOptionsList(){
+  return Array.from(new Set(state.genPoLines.map(r=>r.supplier).filter(v=>v)))
+    .sort((a,b)=>a.localeCompare(b))
+    .map(v=>({ value: v, label: v }));
+}
+function genPoPcOptionsList(){
+  return Array.from(new Set(state.genPoLines.map(r=>r.pc).filter(v=>v!==null && v!==undefined)))
+    .sort((a,b)=>a-b)
+    .map(v=>({ value: String(v), label: pcLabel(v) }));
+}
+function genPoHoldTypeOptionsList(){
+  return Array.from(new Set(state.genPoLines.map(r=>r.hold_type || '(none)')))
+    .sort((a,b)=>a.localeCompare(b))
+    .map(v=>({ value: v, label: v }));
+}
+function genPoFacetCounts(dim){
+  const counts = new Map();
+  state.genPoLines.forEach(r=>{
+    if(!matchesGenPoFilters(r, state.genPoFilters, dim)) return;
+    let key;
+    if(dim === 'supplier') key = r.supplier || null;
+    else if(dim === 'pc') key = (r.pc===null||r.pc===undefined) ? null : String(r.pc);
+    else if(dim === 'holdType') key = r.hold_type || '(none)';
+    if(key === null) return;
+    counts.set(key, (counts.get(key)||0) + 1);
+  });
+  return counts;
+}
+function renderGenPoFilterCardRow(labelText, dim, options){
+  const counts = genPoFacetCounts(dim);
+  const totalCount = state.genPoLines.filter(r=>matchesGenPoFilters(r, state.genPoFilters, dim)).length;
+  const activeVals = state.genPoFilters[dim];
+  const visibleOptions = options.filter(o=>(counts.get(o.value)||0) > 0);
+  return `
+    <div class="filter-row">
+      <div class="filter-row-label">${labelText}</div>
+      <div class="filter-cards">
+        <button type="button" class="filter-card genpo-filter-card ${!activeVals.length?'active':''}" data-dim="${dim}" data-value="">All <span class="count">${totalCount}</span></button>
+        ${visibleOptions.map(o=>`<button type="button" class="filter-card genpo-filter-card ${activeVals.includes(o.value)?'active':''}" data-dim="${dim}" data-value="${escapeAttr(o.value)}">${escapeAttr(o.label)} <span class="count">${counts.get(o.value)||0}</span></button>`).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderGenPo(){
+  let rows = filterGenPoRows(state.genPoFilters);
+  const newTodayHiddenCount = state.genPoFilters.hideNewToday
+    ? filterGenPoRows({ ...state.genPoFilters, hideNewToday: false }).length - rows.length
+    : 0;
+
+  const { col, dir } = state.genPoSort;
+  rows.sort((a,b)=>{
+    let av, bv;
+    if(col === 'days_outstanding'){ av = genPoDaysOutstanding(a); bv = genPoDaysOutstanding(b); av = av===null? -9999 : av; bv = bv===null? -9999 : bv; }
+    else { av = a[col]; bv = b[col]; }
+    if(av === null || av === undefined) av = '';
+    if(bv === null || bv === undefined) bv = '';
+    if(av < bv) return dir==='asc' ? -1 : 1;
+    if(av > bv) return dir==='asc' ? 1 : -1;
+    return 0;
+  });
+
+  const supplierOptions = genPoSupplierOptionsList();
+  const pcOptions = genPoPcOptionsList();
+  const holdTypeOptions = genPoHoldTypeOptionsList();
+  const totalCost = rows.reduce((sum,r)=>sum + (Number(r.total_cost)||0), 0);
+
+  const CAP = 500;
+  const shown = state.showAllGenPoRows ? rows : rows.slice(0, CAP);
+
+  return `
+    <div class="panel">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:10px;">
+        <p style="color:var(--muted);font-size:12.5px;font-style:italic;margin:0;">${state.lastGenPoBatch ? `Last uploaded: ${new Date(state.lastGenPoBatch.uploaded_at).toLocaleString()}${state.lastGenPoBatch.source_filename ? ` (${escapeAttr(state.lastGenPoBatch.source_filename)})` : ''}` : 'Never uploaded yet.'}</p>
+        <div>
+          <span style="font-weight:700;font-size:12.5px;margin-right:8px;">Stock:</span>
+          <div class="toggle-group" id="genPoStockToggle" style="display:inline-flex;">
+            <button type="button" data-stock="" class="${!state.genPoFilters.stockOnly?'active':''}">All</button>
+            <button type="button" data-stock="stock" class="${state.genPoFilters.stockOnly==='stock'?'active':''}">Stock</button>
+            <button type="button" data-stock="nonstock" class="${state.genPoFilters.stockOnly==='nonstock'?'active':''}">Non-Stock</button>
+          </div>
+        </div>
+        <button type="button" class="btn secondary" id="clearGenPoFiltersBtn">Clear all filters</button>
+      </div>
+      <div class="stat-row">
+        <div class="stat"><div class="num">${rows.length.toLocaleString()}</div><div class="label">Outstanding Lines</div></div>
+        <div class="stat"><div class="num">${fmtMoney(totalCost)}</div><div class="label">Total Cost</div></div>
+      </div>
+      ${renderGenPoFilterCardRow('Supplier', 'supplier', supplierOptions)}
+      ${renderGenPoFilterCardRow('Product Category', 'pc', pcOptions)}
+      ${renderGenPoFilterCardRow('Hold Type', 'holdType', holdTypeOptions)}
+      <div class="toolbar">
+        <input type="text" id="f-genpo-search" placeholder="Search order # / style / job # / SKU…" value="${escapeAttr(state.genPoFilters.search)}" style="min-width:220px;">
+        <label><input type="checkbox" id="f-genpo-activeOnly" ${state.genPoFilters.activeOnly?'checked':''}> Active only</label>
+        <label title="Hide lines that first appeared on today's upload - the point of this report is spotting lines that persist, not new ones"><input type="checkbox" id="f-genpo-hideNewToday" ${state.genPoFilters.hideNewToday?'checked':''}> Hide new today</label>
+        <button class="btn secondary" id="genPoExportBtn">Export CSV</button>
+        <span style="margin-left:auto;color:var(--muted);font-size:12.5px;">${rows.length.toLocaleString()} line${rows.length===1?'':'s'}${(rows.length>CAP && !state.showAllGenPoRows)?` (showing first ${CAP})`:''}${newTodayHiddenCount>0?` · ${newTodayHiddenCount.toLocaleString()} new today hidden`:''}</span>
+      </div>
+      <table>
+        <thead><tr>
+          <th data-col="worked">Worked</th>
+          <th data-col="supplier">Supplier</th>
+          <th data-col="pc">PC</th>
+          <th data-col="style_item">Style / Color</th>
+          <th data-col="qty">Qty</th>
+          <th data-col="unit_cost">Unit Cost</th>
+          <th data-col="total_cost">Total Cost</th>
+          <th data-col="order_number">Order #</th>
+          <th data-col="job_number">Job #</th>
+          <th data-col="key_date">Key Date</th>
+          <th data-col="line_del_date">Line Del Date</th>
+          <th data-col="hold_type">Hold Type</th>
+          <th data-col="days_outstanding">Outstanding</th>
+        </tr></thead>
+        <tbody>
+          ${shown.length ? shown.map(r=>`
+            <tr class="genpo-row" data-key="${escapeAttr(r.line_key)}">
+              <td><input type="checkbox" class="genpo-worked-checkbox" data-key="${escapeAttr(r.line_key)}" ${r.worked?'checked':''}></td>
+              <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
+              <td>${pcLabel(r.pc)}${r.is_stock_item ? ' <span class="badge current" title="Stock item">Stock</span>' : ''}</td>
+              <td class="td-truncate" title="${escapeAttr((r.style_item||'') + (r.color_desc?(' · '+r.color_desc):''))}">${r.style_item || ''} ${r.color_desc?('· '+r.color_desc):''}</td>
+              <td>${r.qty!=null ? Number(r.qty).toLocaleString() : '—'} ${r.units||''}</td>
+              <td>${fmtMoney(r.unit_cost)}</td>
+              <td>${fmtMoney(r.total_cost)}</td>
+              <td>${r.order_number || '—'}${r.line!=null ? `-${r.line}` : ''}${r.is_active===false?' <span class="badge blank">closed</span>':''}</td>
+              <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.job_number)}">${r.job_number || ''}</td>
+              <td>${fmtDate(r.key_date)}</td>
+              <td>${fmtDate(r.line_del_date)}</td>
+              <td>${r.hold_type || ''}</td>
+              <td><span class="badge ${genPoAgeBucket(genPoDaysOutstanding(r))}">${genPoDaysOutstanding(r)===null?'—':genPoDaysOutstanding(r)+'d'}</span></td>
+            </tr>
+          `).join('') : `<tr><td colspan="13" class="empty">No Gen PO lines match these filters.</td></tr>`}
+        </tbody>
+      </table>
+      ${(rows.length > CAP && !state.showAllGenPoRows) ? `
+        <div style="text-align:center;margin-top:14px;">
+          <button type="button" class="btn secondary" id="showAllGenPoRowsBtn">Show All ${rows.length.toLocaleString()} Lines</button>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+async function openGenPoHistoryModal(lineKey){
+  const row = state.genPoLines.find(r=>r.line_key === lineKey);
+  showModal(`<span class="close" id="modalClose">&times;</span><h2>${escapeAttr(lineKey)}</h2><p class="empty">Loading history…</p>`);
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+
+  const { data: history, error } = await sb.from('gen_po_line_history').select('*').eq('line_key', lineKey).order('detected_at', { ascending: true });
+  if(error){ showModal(`<span class="close" id="modalClose">&times;</span><h2>${escapeAttr(lineKey)}</h2><p class="empty">Error loading history.</p>`); document.getElementById('modalClose').addEventListener('click', closeModal); return; }
+
+  const header = row ? `
+    <div style="font-size:13px;color:var(--muted);margin-bottom:14px;">
+      ${row.supplier || ''} · ${row.style_item || ''} ${row.color_desc ? ('· '+row.color_desc) : ''}<br>
+      Order ${row.order_number}-${row.line} · Job ${row.job_number || '—'} · Key Date ${fmtDate(row.key_date)} · ${row.is_active===false ? '<span class="badge blank">closed</span>' : `<span class="badge ${genPoAgeBucket(genPoDaysOutstanding(row))}">${genPoDaysOutstanding(row)}d outstanding</span>`}
+    </div>` : '';
+
+  const events = history.map(ev=>{
+    let body = '';
+    if(ev.event_type === 'created'){ body = 'First appeared on an upload.'; }
+    else if(ev.event_type === 'closed'){ body = 'No longer on the export (shipped / received / canceled elsewhere).'; }
+    else if(ev.event_type === 'reappeared'){ body = 'Back on the export after being closed.'; }
+    else if(ev.event_type === 'updated'){
+      body = (ev.changes||[]).map(c=>`<div class="tl-diff"><span class="f">${c.field}:</span> ${c.old ?? '—'} → <strong>${c.new ?? '—'}</strong></div>`).join('');
+    }
+    else if(ev.event_type === 'worked'){ body = 'Marked as worked.' + (ev.changes && ev.changes.note ? `<div class="tl-diff"><span class="f">Note:</span> ${escapeAttr(ev.changes.note)}</div>` : ''); }
+    else if(ev.event_type === 'unworked'){ body = 'Unmarked as worked.' + (ev.changes && ev.changes.note ? `<div class="tl-diff"><span class="f">Note:</span> ${escapeAttr(ev.changes.note)}</div>` : ''); }
+    return `<div class="tl-event">
+      <div class="tl-date">${new Date(ev.detected_at).toLocaleString()}${ev.actor ? ` · <span style="color:var(--accent);">${escapeAttr(ev.actor)}</span>` : ''}</div>
+      <div class="tl-type">${ev.event_type}</div>
+      ${body}
+    </div>`;
+  }).join('') || '<p class="empty">No history yet.</p>';
+
+  showModal(`<span class="close" id="modalClose">&times;</span><h2>${escapeAttr(lineKey)}</h2>${header}<div class="timeline">${events}</div>`);
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+}
+
+function openGenPoWorkedConfirmModal(lineKey, newValue){
+  const row = state.genPoLines.find(r=>r.line_key === lineKey);
+  if(!row) return;
+  showModal(`
+    <span class="close" id="modalClose">&times;</span>
+    <h2>${newValue ? 'Mark as Worked' : 'Unmark as Worked'}</h2>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:14px;">
+      <strong>${escapeAttr(row.order_number)}-${row.line}</strong> · ${row.supplier || ''} · ${row.style_item || ''}${row.color_desc ? (' · '+row.color_desc) : ''}
+    </div>
+    <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;">Notes (optional)</label>
+    <textarea id="genPoWorkedNoteInput" rows="3" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:7px;font-family:inherit;font-size:13px;margin-bottom:14px;resize:vertical;" placeholder="Add a note about this…" autofocus></textarea>
+    <div id="genPoWorkedConfirmError" class="pw-error hidden"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn secondary" id="genPoWorkedCancelBtn">Cancel</button>
+      <button class="btn" id="genPoWorkedConfirmBtn">Confirm</button>
+    </div>
+  `);
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+  document.getElementById('genPoWorkedCancelBtn').addEventListener('click', closeModal);
+  document.getElementById('genPoWorkedConfirmBtn').addEventListener('click', ()=>confirmGenPoWorkedToggle(lineKey, newValue));
+}
+
+async function confirmGenPoWorkedToggle(lineKey, newValue){
+  const row = state.genPoLines.find(r=>r.line_key === lineKey);
+  if(!row) return;
+  const note = document.getElementById('genPoWorkedNoteInput').value.trim();
+  const btn = document.getElementById('genPoWorkedConfirmBtn');
+  const errBox = document.getElementById('genPoWorkedConfirmError');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const nowIso = new Date().toISOString();
+  try{
+    const { error } = await sb.from('gen_po_lines').update({ worked: newValue, worked_at: newValue ? nowIso : null }).eq('line_key', lineKey);
+    if(error) throw error;
+    const { error: histErr } = await sb.from('gen_po_line_history').insert({
+      line_key: lineKey, batch_id: null, event_type: newValue ? 'worked' : 'unworked',
+      changes: note ? { note } : null, actor: state.currentUser, detected_at: nowIso
+    });
+    if(histErr) throw histErr;
+    row.worked = newValue;
+    row.worked_at = newValue ? nowIso : null;
+    closeModal();
+    render();
+  } catch(err){
+    errBox.textContent = 'Error saving: ' + err.message;
+    errBox.classList.remove('hidden');
+    btn.disabled = false; btn.textContent = 'Confirm';
+  }
+}
+
+function exportGenPoCsv(){
+  const rows = filterGenPoRows(state.genPoFilters);
+  const csv = Papa.unparse(rows.map(r=>({
+    Worked: r.worked ? 'Yes' : 'No', Supplier: r.supplier, PC: r.pc, 'Style/Item': r.style_item, Color: r.color_desc,
+    Qty: r.qty, Units: r.units, 'Unit Cost': r.unit_cost, 'Total Cost': r.total_cost, 'Order Number': r.order_number,
+    Line: r.line, 'Job Number': r.job_number, 'Key Date': r.key_date, 'Line Del Date': r.line_del_date,
+    'Hold Type': r.hold_type, Stock: r.is_stock_item ? 'Yes' : 'No', 'Days Outstanding': genPoDaysOutstanding(r)
+  })));
+  const blob = new Blob([csv], { type:'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'outstanding-gen-po-export.csv'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ============================================================
 // ETA CHANGES (promise-date pushes across recent uploads)
 // ============================================================
 function changesSeverityFacetCounts(events){
@@ -1446,6 +1765,43 @@ function renderUpload(){
       ${(!listingReady || !summaryReady) ? `<p style="color:var(--muted);font-size:12.5px;margin-top:8px;">Still needed: ${[!listingReady?'Purchase Order Listing Report':null, !summaryReady?'PO Summary Report':null].filter(Boolean).join(', ')}</p>` : ''}
     </div>
     <div class="panel">
+      <h2 style="margin-top:0;">Upload Outstanding Gen PO Lines</h2>
+      <p style="color:var(--muted);font-size:13px;">Drop the Outstanding Gen PO Lines.xlsx export. The app finds the sheet with current data itself (it prefers a sheet named "today", falling back to whichever matching sheet has the most rows) and tracks new / resolved lines on its own — the workbook's own per-date tabs don't need to be kept up for this.</p>
+      <p style="color:var(--muted);font-size:12.5px;font-style:italic;">${state.lastGenPoBatch ? `Last uploaded: ${new Date(state.lastGenPoBatch.uploaded_at).toLocaleString()}${state.lastGenPoBatch.source_filename ? ` (${escapeAttr(state.lastGenPoBatch.source_filename)})` : ''}` : 'Never uploaded yet.'}</p>
+      ${state.stagedGenPoFile ? `
+        ${state.genPoStageError ? `
+          <div class="dropzone" style="border-color:var(--bad);background:var(--bad-bg);color:var(--bad);">
+            ✗ ${escapeAttr(state.genPoStageError)}
+          </div>
+        ` : state.stagedGenPoPreview ? (()=>{
+          const { candidates, selectedSheetName } = state.stagedGenPoPreview;
+          const selected = candidates.find(c=>c.name === selectedSheetName);
+          return `
+          <div class="dropzone" style="border-color:var(--good);background:var(--good-bg);color:var(--good);">
+            ✓ ${escapeAttr(state.stagedGenPoFile.name)} — found ${(selected?.dataRowCount||0).toLocaleString()} rows on sheet "${escapeAttr(selectedSheetName)}"
+          </div>
+          ${candidates.length > 1 ? `
+            <label style="display:block;font-size:12px;color:var(--muted);margin:10px 0 4px;">Sheet found ${candidates.length} matching tabs — pick the right one:</label>
+            <select id="genPoSheetSelect" style="padding:7px 10px;border:1px solid var(--border);border-radius:7px;">
+              ${candidates.map(c=>`<option value="${escapeAttr(c.name)}" ${c.name===selectedSheetName?'selected':''}>${escapeAttr(c.name)} (${c.dataRowCount.toLocaleString()} rows)</option>`).join('')}
+            </select>
+          ` : ''}
+          ${selectedSheetName.toLowerCase() !== 'today' ? `<p style="color:var(--warn);font-size:12.5px;">⚠ This isn't the "today" tab — double check it's the sheet you meant to upload.</p>` : ''}
+        `; })() : `
+          <div class="dropzone">Reading file…</div>
+        `}
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button type="button" class="btn secondary" id="clearGenPoFileBtn">Choose a different file</button>
+          <button type="button" class="btn" id="confirmGenPoUploadBtn" ${state.stagedGenPoPreview ? '' : 'disabled'}>Confirm &amp; Upload</button>
+        </div>
+      ` : `
+        <div class="dropzone" id="genPoDropzone">
+          <input type="file" id="genPoFileInput" accept=".xlsx,.xls,.xlsm" class="hidden">
+          Drag &amp; drop Outstanding Gen PO Lines.xlsx here, or click to choose a file
+        </div>
+      `}
+    </div>
+    <div class="panel">
       <h2 style="margin-top:0;">Upload Sales Data</h2>
       <p style="color:var(--muted);font-size:13px;">Drop either the raw "Open Orders Detailed" export (.xlsx) from RFMS, or the combined CSV produced by the offline ExtractSalesData.ps1 script (recommended - run it against a folder of exports first to check the data before it goes anywhere near this app). Matches each order to POs by order number and fills in Sales Person, Entered By, and Division - shown as a tooltip when you hover a PO number on All Open POs. Independent of the two reports above; uploads immediately.</p>
       <p style="color:var(--muted);font-size:12.5px;font-style:italic;">${state.lastSalesUploadAt ? `Last uploaded: ${new Date(state.lastSalesUploadAt).toLocaleString()}${state.lastSalesUploadFilename ? ` (${state.lastSalesUploadFilename})` : ''}` : 'Never uploaded yet.'}</p>
@@ -1491,6 +1847,18 @@ function attachUploadHandlers(){
     rdz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f){ state.stagedSummaryFile = f; render(); } });
   }
   document.getElementById('clearSummaryFileBtn')?.addEventListener('click', ()=>{ state.stagedSummaryFile = null; render(); });
+  const gdz = document.getElementById('genPoDropzone');
+  if(gdz){
+    const genPoFileInput = document.getElementById('genPoFileInput');
+    gdz.addEventListener('click', ()=>genPoFileInput.click());
+    genPoFileInput.addEventListener('change', (e)=>{ if(e.target.files[0]) stageGenPoFile(e.target.files[0]); });
+    ['dragenter','dragover'].forEach(ev=>gdz.addEventListener(ev, (e)=>{ e.preventDefault(); gdz.classList.add('drag'); }));
+    ['dragleave','drop'].forEach(ev=>gdz.addEventListener(ev, (e)=>{ e.preventDefault(); gdz.classList.remove('drag'); }));
+    gdz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f) stageGenPoFile(f); });
+  }
+  document.getElementById('clearGenPoFileBtn')?.addEventListener('click', clearGenPoStagedFile);
+  document.getElementById('confirmGenPoUploadBtn')?.addEventListener('click', confirmGenPoUpload);
+  document.getElementById('genPoSheetSelect')?.addEventListener('change', (e)=>{ state.stagedGenPoPreview.selectedSheetName = e.target.value; render(); });
   const sdz = document.getElementById('salesDropzone');
   if(sdz){
     const salesFileInput = document.getElementById('salesFileInput');
@@ -1764,6 +2132,236 @@ async function processReceivedUpload(rows, filename){
   await saveLastReceivedUpload(filename);
   await refreshData();
   setTimeout(hideProgress, 2500);
+}
+
+// ============================================================
+// OUTSTANDING GEN PO LINES upload (.xlsx export; the app finds the sheet with live data
+// itself and does its own created/updated/closed history tracking, so the workbook's own
+// per-date tabs don't need to be replicated here). Columns are read positionally because
+// the header text/row differs between the "today" tab and the archived per-date tabs, but
+// the data column order underneath is identical either way.
+// ============================================================
+const GENPO_HEADER_SIGNATURE = ['pc', 'style/item', 'order number'];
+const GENPO_FIELDS_TO_COMPARE = ['supplier','sc','pc','style_item','color_desc','roll_item_number','width','length',
+  'item_size','qty','units','unit_cost','total_cost','sku','install_date','key_date','line_del_date',
+  'job_number','matched_inventory','hold_type','seq_num','is_stock_item'];
+
+// Scans every sheet for a row matching GENPO_HEADER_SIGNATURE (within its first 5 rows).
+// Prefers a sheet named "today" if it has data rows; otherwise picks whichever matching
+// sheet has the most, since the workbook's archived per-date tabs are all valid matches too.
+function findGenPoCandidates(workbook){
+  const candidates = [];
+  for(const name of workbook.SheetNames){
+    const grid = XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: '' });
+    for(let i=0; i<Math.min(grid.length, 5); i++){
+      const rowLower = (grid[i]||[]).map(c=>String(c||'').trim().toLowerCase());
+      if(GENPO_HEADER_SIGNATURE.every(sig=>rowLower.includes(sig))){
+        const dataRowCount = grid.slice(i+1).filter(r=>r[12] !== '' && r[12] != null).length; // col 12 = Order Number
+        candidates.push({ name, headerRowIndex: i, dataRowCount, grid });
+        break;
+      }
+    }
+  }
+  return candidates;
+}
+
+// When there's exactly one matching sheet, or a populated "today" sheet, that's an
+// unambiguous choice worth auto-selecting. Otherwise (e.g. this workbook's many archived
+// per-date tabs, with "today" not yet refreshed) there's no reliable way to know which
+// tab is "current" from the name alone - defaulting to the largest and letting the sheet
+// picker in the UI be overridden is safer than silently guessing wrong.
+function pickDefaultGenPoSheet(candidates){
+  if(candidates.length === 1) return candidates[0].name;
+  const today = candidates.find(c=>c.name.toLowerCase() === 'today' && c.dataRowCount > 0);
+  if(today) return today.name;
+  return candidates.reduce((best,c)=> (!best || c.dataRowCount > best.dataRowCount) ? c : best, candidates[0]).name;
+}
+
+function genPoSelectedCandidate(){
+  if(!state.stagedGenPoPreview) return null;
+  return state.stagedGenPoPreview.candidates.find(c=>c.name === state.stagedGenPoPreview.selectedSheetName) || null;
+}
+function genPoSelectedDataRows(){
+  const c = genPoSelectedCandidate();
+  if(!c) return [];
+  return c.grid.slice(c.headerRowIndex + 1).map(mapGenPoRow).filter(Boolean);
+}
+
+function parseDateCell(v){
+  if(v === null || v === undefined || v === '') return null;
+  if(v instanceof Date) return isNaN(v) ? null : toDateStr(v);
+  const s = String(v).trim();
+  if(!s) return null;
+  const d = new Date(s);
+  return isNaN(d) ? null : toDateStr(d);
+}
+function numOrNull(v){
+  if(v === null || v === undefined || v === '') return null;
+  const n = parseFloat(v);
+  return isNaN(n) ? null : n;
+}
+function intOrNull(v){
+  const n = numOrNull(v);
+  return n === null ? null : Math.round(n);
+}
+function strOrNull(v){
+  const s = String(v==null?'':v).trim();
+  return s === '' ? null : s;
+}
+
+// Positional column mapping (0-based), matching Outstanding Gen PO Lines.xlsx's layout:
+// Supplier, SC, PC, Style/Item, Color/Desc, Roll/Item #, Width, Length, Item Size, Qty,
+// Units, Unit Cost, Order Number, Line, Total Cost, SKU, Install Date, Key Date,
+// Line Del Date, Job Number, Matched Inventory, Hold Type, Seq Num, (dup Seq Num), ..., STOCK?
+function mapGenPoRow(r){
+  const order_number = strOrNull(r[12]);
+  const line = intOrNull(r[13]);
+  if(!order_number || line === null) return null;
+  return {
+    line_key: `${order_number}-${line}`,
+    supplier: strOrNull(r[0]),
+    sc: intOrNull(r[1]),
+    pc: intOrNull(r[2]),
+    style_item: strOrNull(r[3]),
+    color_desc: strOrNull(r[4]),
+    roll_item_number: strOrNull(r[5]),
+    width: strOrNull(r[6]),
+    length: strOrNull(r[7]),
+    item_size: strOrNull(r[8]),
+    qty: numOrNull(r[9]),
+    units: strOrNull(r[10]),
+    unit_cost: numOrNull(r[11]),
+    order_number,
+    line,
+    total_cost: numOrNull(r[14]),
+    sku: strOrNull(r[15]),
+    install_date: parseDateCell(r[16]),
+    key_date: parseDateCell(r[17]),
+    line_del_date: parseDateCell(r[18]),
+    job_number: strOrNull(r[19]),
+    matched_inventory: strOrNull(r[20]),
+    hold_type: strOrNull(r[21]),
+    seq_num: strOrNull(r[22]),
+    is_stock_item: !!r[27]
+  };
+}
+
+// Unlike the other uploads on this page, this one parses the file and shows what it found
+// (sheet name, row count) before writing anything - picking the wrong sheet out of a
+// multi-hundred-tab workbook would otherwise silently corrupt the created/closed history.
+async function stageGenPoFile(file){
+  state.stagedGenPoFile = file;
+  state.stagedGenPoPreview = null;
+  state.genPoStageError = null;
+  render();
+  try{
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(new Uint8Array(buf), { type: 'array', cellDates: true });
+    const candidates = findGenPoCandidates(wb);
+    if(!candidates.length) throw new Error('Could not find a sheet with the expected header row (PC / Style/Item / Order Number).');
+    state.stagedGenPoPreview = { candidates, selectedSheetName: pickDefaultGenPoSheet(candidates) };
+  } catch(err){
+    state.genPoStageError = err.message || String(err);
+  }
+  render();
+}
+
+function clearGenPoStagedFile(){
+  state.stagedGenPoFile = null;
+  state.stagedGenPoPreview = null;
+  state.genPoStageError = null;
+  render();
+}
+
+async function confirmGenPoUpload(){
+  if(!state.stagedGenPoPreview) return;
+  const sheetName = state.stagedGenPoPreview.selectedSheetName;
+  const dataRows = genPoSelectedDataRows();
+  const filename = state.stagedGenPoFile.name;
+  const btn = document.getElementById('confirmGenPoUploadBtn');
+  if(btn) btn.disabled = true;
+  try{
+    await processGenPoUpload(dataRows, filename, sheetName);
+    state.stagedGenPoFile = null;
+    state.stagedGenPoPreview = null;
+  } catch(err){
+    console.error(err);
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function upsertChunkedGenPo(rows, chunkSize){
+  for(let i=0; i<rows.length; i+=chunkSize){
+    const chunk = rows.slice(i, i+chunkSize);
+    const { error } = await sb.from('gen_po_lines').upsert(chunk, { onConflict: 'line_key' });
+    if(error) throw error;
+    showProgress(`Saving Gen PO lines… ${Math.min(i+chunkSize, rows.length).toLocaleString()} / ${rows.length.toLocaleString()}`, 40 + (i/rows.length)*40);
+  }
+}
+
+async function processGenPoUpload(uploadRowsRaw, filename, sheetName){
+  showProgress(`Parsed ${uploadRowsRaw.length.toLocaleString()} rows. Deduplicating…`, 20);
+  const byKey = new Map();
+  uploadRowsRaw.forEach(r=>byKey.set(r.line_key, r)); // last one wins if dup within file
+  const uploadRows = Array.from(byKey.values());
+
+  showProgress('Creating batch record…', 25);
+  const { data: batchRow, error: batchErr } = await sb.from('report_batches')
+    .insert({ source_filename: `${filename} (${sheetName})`, row_count: uploadRows.length, report_type: 'gen_po' }).select().single();
+  if(batchErr) throw batchErr;
+  const batchId = batchRow.id;
+
+  showProgress('Loading current state…', 30);
+  const existing = await loadAllGenPo();
+  const existingByKey = new Map(existing.map(r=>[r.line_key, r]));
+  const seenKeySet = new Set(uploadRows.map(r=>r.line_key));
+  const nowIso = new Date().toISOString();
+
+  const upserts = [];
+  const historyEvents = [];
+
+  for(const row of uploadRows){
+    const prev = existingByKey.get(row.line_key);
+    if(!prev){
+      upserts.push({ ...row, first_seen_batch_id: batchId, first_seen_at: nowIso, last_seen_batch_id: batchId, last_seen_at: nowIso, is_active: true, worked: false, worked_at: null });
+      historyEvents.push({ line_key: row.line_key, batch_id: batchId, event_type: 'created', changes: null, actor: state.currentUser, detected_at: nowIso });
+    } else {
+      const changes = [];
+      GENPO_FIELDS_TO_COMPARE.forEach(f=>{
+        if(!valuesEqual(prev[f], row[f])) changes.push({ field: f, old: prev[f] ?? null, new: row[f] ?? null });
+      });
+      const wasInactive = prev.is_active === false;
+      // Worked is a "handled this cycle" flag, not a permanent one - every fresh upload resets
+      // it so buyers re-review the current list rather than it staying checked off indefinitely.
+      upserts.push({ ...row, first_seen_batch_id: prev.first_seen_batch_id, first_seen_at: prev.first_seen_at, last_seen_batch_id: batchId, last_seen_at: nowIso, is_active: true, worked: false, worked_at: null });
+      if(changes.length){
+        historyEvents.push({ line_key: row.line_key, batch_id: batchId, event_type: wasInactive ? 'reappeared' : 'updated', changes, actor: state.currentUser, detected_at: nowIso });
+      } else if(wasInactive){
+        historyEvents.push({ line_key: row.line_key, batch_id: batchId, event_type: 'reappeared', changes: null, actor: state.currentUser, detected_at: nowIso });
+      }
+    }
+  }
+
+  const closedUpdates = [];
+  for(const prev of existing){
+    if(prev.is_active && !seenKeySet.has(prev.line_key)){
+      closedUpdates.push({ line_key: prev.line_key, is_active: false });
+      historyEvents.push({ line_key: prev.line_key, batch_id: batchId, event_type: 'closed', changes: null, actor: state.currentUser, detected_at: nowIso });
+    }
+  }
+
+  showProgress(`Saving ${upserts.length.toLocaleString()} Gen PO lines…`, 40);
+  await upsertChunkedGenPo(upserts, 500);
+  if(closedUpdates.length){
+    showProgress(`Marking ${closedUpdates.length.toLocaleString()} lines closed…`, 82);
+    await upsertChunkedGenPo(closedUpdates, 500);
+  }
+  showProgress(`Writing ${historyEvents.length.toLocaleString()} history events…`, 90);
+  await insertChunked('gen_po_line_history', historyEvents, 500);
+
+  showProgress('Done. Refreshing…', 100);
+  await refreshData();
+  setTimeout(hideProgress, 1500);
 }
 
 // ============================================================
@@ -2123,6 +2721,7 @@ async function confirmWorkedToggle(poNumber, newValue){
 // ============================================================
 function attachViewHandlers(){
   if(state.view === 'upload'){ attachUploadHandlers(); return; }
+  if(state.view === 'genpo'){ attachGenPoHandlers(); return; }
 
   document.querySelectorAll('tr.po-row').forEach(tr=>{
     tr.addEventListener('click', ()=>openHistoryModal(tr.dataset.po));
@@ -2271,6 +2870,48 @@ function attachViewHandlers(){
   }
 }
 
+function attachGenPoHandlers(){
+  document.querySelectorAll('tr.genpo-row').forEach(tr=>{
+    tr.addEventListener('click', ()=>openGenPoHistoryModal(tr.dataset.key));
+  });
+  document.getElementById('genPoStockToggle')?.addEventListener('click', (e)=>{
+    const b = e.target.closest('button[data-stock]'); if(!b) return;
+    state.genPoFilters.stockOnly = b.dataset.stock;
+    render();
+  });
+  document.getElementById('clearGenPoFiltersBtn')?.addEventListener('click', ()=>{
+    state.genPoFilters = { supplier: [], pc: [], holdType: [], stockOnly: '', search: '', activeOnly: true, hideNewToday: true };
+    render();
+  });
+  document.querySelectorAll('.genpo-filter-card').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      toggleFilterValue(state.genPoFilters, btn.dataset.dim, btn.dataset.value);
+      render();
+    });
+  });
+  document.querySelectorAll('.genpo-worked-checkbox').forEach(cb=>{
+    cb.addEventListener('click', (e)=>{
+      e.stopPropagation();
+      e.preventDefault(); // don't let the box actually toggle until the modal is confirmed
+      const row = state.genPoLines.find(r=>r.line_key === cb.dataset.key);
+      openGenPoWorkedConfirmModal(cb.dataset.key, row ? !row.worked : true);
+    });
+  });
+  document.getElementById('f-genpo-search')?.addEventListener('input', (e)=>{ state.genPoFilters.search = e.target.value; render(); });
+  document.getElementById('f-genpo-activeOnly')?.addEventListener('change', (e)=>{ state.genPoFilters.activeOnly = e.target.checked; render(); });
+  document.getElementById('f-genpo-hideNewToday')?.addEventListener('change', (e)=>{ state.genPoFilters.hideNewToday = e.target.checked; render(); });
+  document.getElementById('genPoExportBtn')?.addEventListener('click', exportGenPoCsv);
+  document.getElementById('showAllGenPoRowsBtn')?.addEventListener('click', ()=>{ state.showAllGenPoRows = true; render(); });
+  document.querySelectorAll('th[data-col]').forEach(th=>{
+    th.addEventListener('click', ()=>{
+      const col = th.dataset.col;
+      if(state.genPoSort.col === col) state.genPoSort.dir = state.genPoSort.dir==='asc' ? 'desc' : 'asc';
+      else { state.genPoSort.col = col; state.genPoSort.dir = 'asc'; }
+      render();
+    });
+  });
+}
+
 function exportCsv(){
   const rows = filterRows(state.filters);
   const csv = Papa.unparse(rows.map(r=>({
@@ -2289,7 +2930,7 @@ function exportCsv(){
 // Allows deep-linking straight to a tab, e.g. ?view=large from the Purchasing Portal.
 (function(){
   const requestedView = new URLSearchParams(window.location.search).get('view');
-  if(['rollup','open','large'].includes(requestedView)){
+  if(['rollup','open','large','genpo'].includes(requestedView)){
     state.view = requestedView;
     document.querySelectorAll('#mainNav button[data-view]').forEach(b=>b.classList.toggle('active', b.dataset.view===requestedView));
   }

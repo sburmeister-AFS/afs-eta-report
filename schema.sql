@@ -9,6 +9,10 @@ create table if not exists public.report_batches (
   row_count integer not null default 0
 );
 
+-- Discriminates which upload flow a batch came from. Existing rows predate
+-- this column and are all 'po_listing' (the only type there used to be).
+alter table public.report_batches add column if not exists report_type text not null default 'po_listing';
+
 alter table public.report_batches enable row level security;
 create policy "anon read" on public.report_batches for select using (true);
 create policy "anon insert" on public.report_batches for insert with check (true);
@@ -103,4 +107,71 @@ alter table public.app_settings add column if not exists last_sales_upload_filen
 
 alter table public.app_settings enable row level security;
 create policy "anon read" on public.app_settings for select using (true);
+create policy "anon update" on public.app_settings for update using (true) with check (true);
+
+-- Outstanding Gen PO Lines view: general-merchandise PO lines that haven't
+-- shipped/received yet, uploaded from a daily xlsx export. Mirrors the
+-- po_lines / po_line_history pattern above (line_key = order_number || '-' ||
+-- line, since Gen PO lines have no single natural id column).
+create table if not exists public.gen_po_lines (
+  line_key text primary key,
+  supplier text,
+  sc integer,
+  pc integer,
+  style_item text,
+  color_desc text,
+  roll_item_number text,
+  width text,
+  length text,
+  item_size text,
+  qty numeric,
+  units text,
+  unit_cost numeric,
+  order_number text,
+  line integer,
+  total_cost numeric,
+  sku text,
+  install_date date,
+  key_date date,
+  line_del_date date,
+  job_number text,
+  matched_inventory text,
+  hold_type text,
+  seq_num text,
+  is_stock_item boolean,
+  first_seen_batch_id bigint references public.report_batches(id),
+  first_seen_at timestamptz not null default now(),
+  last_seen_batch_id bigint references public.report_batches(id),
+  last_seen_at timestamptz not null default now(),
+  is_active boolean not null default true,
+  worked boolean not null default false,
+  worked_at timestamptz
+);
+
+create index if not exists gen_po_lines_order_number_idx on public.gen_po_lines (order_number);
+create index if not exists gen_po_lines_supplier_idx on public.gen_po_lines (supplier);
+create index if not exists gen_po_lines_pc_idx on public.gen_po_lines (pc);
+create index if not exists gen_po_lines_is_active_idx on public.gen_po_lines (is_active);
+create index if not exists gen_po_lines_job_number_idx on public.gen_po_lines (job_number);
+
+alter table public.gen_po_lines enable row level security;
+create policy "anon read" on public.gen_po_lines for select using (true);
+create policy "anon insert" on public.gen_po_lines for insert with check (true);
+create policy "anon update" on public.gen_po_lines for update using (true) with check (true);
+
+create table if not exists public.gen_po_line_history (
+  id bigint generated always as identity primary key,
+  line_key text not null references public.gen_po_lines(line_key) on delete cascade,
+  batch_id bigint references public.report_batches(id),
+  event_type text not null check (event_type in ('created','updated','closed','reappeared','worked','unworked')),
+  changes jsonb,
+  actor text,
+  detected_at timestamptz not null default now()
+);
+
+create index if not exists gen_po_line_history_line_key_idx on public.gen_po_line_history (line_key, detected_at);
+
+alter table public.gen_po_line_history enable row level security;
+create policy "anon read" on public.gen_po_line_history for select using (true);
+create policy "anon insert" on public.gen_po_line_history for insert with check (true);
 create policy "anon update" on public.app_settings for update using (true) with check (true);
