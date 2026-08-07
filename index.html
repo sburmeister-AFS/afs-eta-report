@@ -774,10 +774,15 @@ function renderScorecard(totals, totalAll, goals){
     <div class="panel">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:10px;">
         <h2 style="margin:0;font-size:15px;">Scorecard</h2>
-        <div style="font-size:13px;display:flex;align-items:center;gap:10px;">
+        <div style="font-size:13px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
           <span style="color:var(--muted);">Composite Score</span>
           <span class="${compositeCls}" style="padding:3px 10px;border-radius:20px;font-size:14px;">${(composite*100).toFixed(1)}%</span>
           <span style="color:var(--muted);">vs. target ${(OVERALL_SCORE_GOAL*100).toFixed(0)}%</span>
+          <span style="font-weight:700;margin-left:10px;">Scope:</span>
+          <div class="toggle-group rollup-scope-toggle">
+            <button data-scope="all" class="${state.rollupScope==='all'?'active':''}">All POs</button>
+            <button data-scope="purchasing" class="${state.rollupScope==='purchasing'?'active':''}">Purchasing Associates</button>
+          </div>
         </div>
       </div>
       <table>
@@ -848,7 +853,7 @@ function renderRollup(){
           <button data-group="store" class="${state.rollupGroupBy==='store'?'active':''}">Store</button>
         </div>
         <span style="font-weight:700;margin-left:16px;">Scope:</span>
-        <div class="toggle-group" id="scopeToggle">
+        <div class="toggle-group rollup-scope-toggle">
           <button data-scope="all" class="${state.rollupScope==='all'?'active':''}">All POs</button>
           <button data-scope="purchasing" class="${state.rollupScope==='purchasing'?'active':''}">Purchasing Associates</button>
         </div>
@@ -2969,9 +2974,11 @@ function attachViewHandlers(){
       const b = e.target.closest('button[data-group]'); if(!b) return;
       state.rollupGroupBy = b.dataset.group; render();
     });
-    document.getElementById('scopeToggle')?.addEventListener('click', (e)=>{
-      const b = e.target.closest('button[data-scope]'); if(!b) return;
-      state.rollupScope = b.dataset.scope; render();
+    document.querySelectorAll('.rollup-scope-toggle').forEach(toggle=>{
+      toggle.addEventListener('click', (e)=>{
+        const b = e.target.closest('button[data-scope]'); if(!b) return;
+        state.rollupScope = b.dataset.scope; render();
+      });
     });
   }
 
