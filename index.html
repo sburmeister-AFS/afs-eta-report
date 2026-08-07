@@ -639,7 +639,12 @@ async function refreshData(){
   document.getElementById('lastUpdated').textContent = batch
     ? `Last upload: ${new Date(batch.uploaded_at).toLocaleString()} · ${batch.row_count} open POs`
     : 'No data uploaded yet';
+  // new upload data can change both of these, so drop the cached computations
+  state.vendorScorecardData = null;
+  state.changesData = null;
   render();
+  if(state.view === 'vendors') loadVendorScorecardAndRender();
+  else if(state.view === 'changes') loadEtaChangesAndRender();
 }
 
 // ---------- nav ----------
