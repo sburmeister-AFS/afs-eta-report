@@ -152,16 +152,26 @@ const GOALS = {
 const IMPORTANCE = { current: 0.24, b7: 0.07, b14: 0.10, b21: 0.20, b28: 0.25, blank: 0.14 };
 const OVERALL_SCORE_GOAL = 0.82; // target composite score
 
-// Continuous 0-100% credit instead of a flat pass/fail: partial credit scales with how close
-// actual is to goal, so "barely missed" and "way over goal" don't score identically.
+// Hitting the goal exactly scores 90; maxing out (100% current, or 0% on a past-due bucket)
+// scores 100, scaling linearly between the two. Missing the goal scales 0-90 the same way
+// scoring used to scale 0-100, just compressed to leave room above for "beat the goal."
 function scoreFor(bucketKey, actualPct, goalPct){
-  if(bucketKey === 'current'){
-    if(goalPct <= 0) return 1;
-    return Math.max(0, Math.min(1, actualPct / goalPct));
+  const isCurrent = bucketKey === 'current';
+  const maxPct = isCurrent ? 1 : 0; // best-possible value for this bucket
+  const metGoal = isCurrent ? actualPct >= goalPct : actualPct <= goalPct;
+
+  if(metGoal){
+    const span = Math.abs(maxPct - goalPct);
+    if(span <= 0) return 1; // goal already IS the max (e.g. a 0% goal)
+    const t = Math.max(0, Math.min(1, Math.abs(actualPct - goalPct) / span));
+    return 0.90 + 0.10 * t;
   }
-  if(actualPct <= goalPct) return 1;
+  if(isCurrent){
+    if(goalPct <= 0) return 0.90;
+    return 0.90 * Math.max(0, Math.min(1, actualPct / goalPct));
+  }
   if(goalPct <= 0) return 0;
-  return Math.max(0, Math.min(1, goalPct / actualPct));
+  return 0.90 * Math.max(0, Math.min(1, goalPct / actualPct));
 }
 
 const FIELDS_TO_COMPARE = ['store','supplier','product_code','style_name','color_desc','sidemark',
