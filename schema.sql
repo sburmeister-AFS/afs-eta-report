@@ -16,6 +16,7 @@ alter table public.report_batches add column if not exists report_type text not 
 alter table public.report_batches enable row level security;
 create policy "anon read" on public.report_batches for select using (true);
 create policy "anon insert" on public.report_batches for insert with check (true);
+create policy "anon delete" on public.report_batches for delete using (true); -- needed so a bad Gen PO upload can be deleted and redone
 
 create table if not exists public.po_lines (
   po_number text primary key,
@@ -158,6 +159,7 @@ alter table public.gen_po_lines enable row level security;
 create policy "anon read" on public.gen_po_lines for select using (true);
 create policy "anon insert" on public.gen_po_lines for insert with check (true);
 create policy "anon update" on public.gen_po_lines for update using (true) with check (true);
+create policy "anon delete" on public.gen_po_lines for delete using (true);
 
 create table if not exists public.gen_po_line_history (
   id bigint generated always as identity primary key,
@@ -174,4 +176,4 @@ create index if not exists gen_po_line_history_line_key_idx on public.gen_po_lin
 alter table public.gen_po_line_history enable row level security;
 create policy "anon read" on public.gen_po_line_history for select using (true);
 create policy "anon insert" on public.gen_po_line_history for insert with check (true);
-create policy "anon update" on public.app_settings for update using (true) with check (true);
+create policy "anon delete" on public.gen_po_line_history for delete using (true);

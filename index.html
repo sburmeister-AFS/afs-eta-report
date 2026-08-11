@@ -261,7 +261,8 @@ const state = {
   stagedGenPoPreview: null, // { sheetName, rowCount, dataRows } once parsing succeeds
   genPoStageError: null,
   genPoRecentBatches: [], // recent report_batches rows for gen_po, desc by uploaded_at - powers the calendar + the diff/raw-data panel below it
-  selectedGenPoBatchId: null, // batch clicked on the calendar; null = default view (latest upload vs. the one before it)
+  selectedGenPoBatchId: null, // batch clicked on the calendar; null + !genPoDiffHidden = default view (latest upload vs. the one before it)
+  genPoDiffHidden: false, // true = panel showing nothing, reached via Clear/re-clicking the active day - distinct from "no day selected" (which still shows the default diff)
   genPoBatchDiffCache: {}, // batch_id -> resolved diff rows (history events joined to current line info), loaded on demand
   genPoBatchDiffFetching: new Set() // batch_ids currently being fetched, so we don't re-request mid-flight
 };
@@ -1457,22 +1458,22 @@ function renderGenPoDiffTable(diffRows){
 }
 
 function renderGenPoBatchDiffPanel(){
+  // Nothing shown until a day is actually clicked - the calendar's checkmarks are enough on
+  // their own, and not everyone needs the new/changed/closed detail every time.
+  if(!state.selectedGenPoBatchId) return '';
+
   const activeBatch = getActiveGenPoBatch();
   if(!activeBatch) return '';
-  const isDefault = !state.selectedGenPoBatchId;
   const prevBatch = genPoPrevBatch(activeBatch.id);
   const diffRows = state.genPoBatchDiffCache[activeBatch.id];
+  const isLatest = (state.genPoRecentBatches||[])[0] && String(state.genPoRecentBatches[0].id) === String(activeBatch.id);
 
   const activeLabel = new Date(activeBatch.uploaded_at).toLocaleString();
   const prevLabel = prevBatch ? new Date(prevBatch.uploaded_at).toLocaleString() : null;
 
-  const heading = isDefault
-    ? (prevBatch
-        ? `Showing differences between the two most recent uploads: <strong>${escapeAttr(activeLabel)}</strong> vs. <strong>${escapeAttr(prevLabel)}</strong>`
-        : `Only one upload on record (<strong>${escapeAttr(activeLabel)}</strong>) — nothing to compare yet.`)
-    : (prevBatch
-        ? `Raw data from the <strong>${escapeAttr(activeLabel)}</strong> upload, compared to the prior upload on <strong>${escapeAttr(prevLabel)}</strong>`
-        : `Raw data from the <strong>${escapeAttr(activeLabel)}</strong> upload — it was the first one on record, nothing to compare it to.`);
+  const heading = prevBatch
+    ? `Raw data from the <strong>${escapeAttr(activeLabel)}</strong> upload, compared to the prior upload on <strong>${escapeAttr(prevLabel)}</strong>`
+    : `Raw data from the <strong>${escapeAttr(activeLabel)}</strong> upload — it was the first one on record, nothing to compare it to.`;
 
   let body;
   if(!prevBatch){
@@ -1487,7 +1488,10 @@ function renderGenPoBatchDiffPanel(){
     <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
         <div style="font-size:12.5px;color:var(--muted);">${heading}</div>
-        ${!isDefault ? `<button type="button" class="btn secondary" id="clearGenPoBatchSelectionBtn">Clear</button>` : ''}
+        <div style="display:flex;gap:8px;">
+          ${isLatest ? `<button type="button" class="btn" style="background:var(--bad);" id="deleteGenPoBatchBtn">Delete this upload…</button>` : ''}
+          <button type="button" class="btn secondary" id="clearGenPoBatchSelectionBtn">Clear</button>
+        </div>
       </div>
       ${body}
     </div>
@@ -1782,6 +1786,127 @@ async function confirmGenPoWorkedToggle(lineKey, newValue){
     errBox.classList.remove('hidden');
     btn.disabled = false; btn.textContent = 'Confirm';
   }
+}
+
+// ============================================================
+// Delete latest Gen PO upload - reverts everything that batch changed and removes it, so a
+// bad upload (wrong sheet, wrong file) can be fixed and re-uploaded. Only ever offered for the
+// single most recent batch (see the isLatest check in renderGenPoBatchDiffPanel) - undoing an
+// older one would need to account for every batch that ran after it, which isn't attempted here.
+// ============================================================
+function openDeleteGenPoBatchConfirmModal(batchId){
+  const batch = (state.genPoRecentBatches||[]).find(b=>String(b.id)===String(batchId));
+  if(!batch) return;
+  const diffRows = state.genPoBatchDiffCache[batchId] || [];
+  const counts = { created: 0, updated: 0, reappeared: 0, closed: 0 };
+  diffRows.forEach(ev=>{ if(counts[ev.event_type] !== undefined) counts[ev.event_type]++; });
+  showModal(`
+    <span class="close" id="modalClose">&times;</span>
+    <h2>Delete this upload?</h2>
+    <div style="font-size:13px;color:var(--muted);margin-bottom:14px;">
+      <strong>${escapeAttr(new Date(batch.uploaded_at).toLocaleString())}</strong>${batch.source_filename ? ` · ${escapeAttr(batch.source_filename)}` : ''}
+    </div>
+    <p style="font-size:13px;margin-bottom:10px;">This removes everything this upload changed and puts the report back exactly as it was before it, so you can fix the file and upload again:</p>
+    <ul style="font-size:13px;margin:0 0 14px 20px;padding:0;">
+      <li>${counts.created} new line${counts.created===1?'':'s'} will be removed</li>
+      <li>${counts.updated} changed line${counts.updated===1?'':'s'} will be reverted</li>
+      <li>${counts.reappeared} reappeared line${counts.reappeared===1?'':'s'} will go back to closed</li>
+      <li>${counts.closed} closed line${counts.closed===1?'':'s'} will be reactivated</li>
+    </ul>
+    <p style="color:var(--bad);font-size:12.5px;margin-bottom:14px;">This cannot be undone.</p>
+    <div id="deleteGenPoBatchError" class="pw-error hidden"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn secondary" id="deleteGenPoBatchCancelBtn">Cancel</button>
+      <button class="btn" style="background:var(--bad);" id="deleteGenPoBatchConfirmBtn">Delete Upload</button>
+    </div>
+  `);
+  document.getElementById('modalClose').addEventListener('click', closeModal);
+  document.getElementById('deleteGenPoBatchCancelBtn').addEventListener('click', closeModal);
+  document.getElementById('deleteGenPoBatchConfirmBtn').addEventListener('click', ()=>confirmDeleteGenPoBatch(batchId));
+}
+
+async function confirmDeleteGenPoBatch(batchId){
+  const btn = document.getElementById('deleteGenPoBatchConfirmBtn');
+  const errBox = document.getElementById('deleteGenPoBatchError');
+  btn.disabled = true; btn.textContent = 'Deleting…';
+  try{
+    await deleteGenPoBatch(batchId);
+    state.selectedGenPoBatchId = null;
+    closeModal();
+    await refreshData();
+    setTimeout(hideProgress, 1000);
+  } catch(err){
+    console.error(err);
+    hideProgress();
+    errBox.textContent = 'Error deleting: ' + err.message;
+    errBox.classList.remove('hidden');
+    btn.disabled = false; btn.textContent = 'Delete Upload';
+  }
+}
+
+// Reverts every gen_po_lines row this batch touched using that batch's own history events
+// (created -> delete the row; updated/reappeared -> restore the old field values from the
+// event's changes list; closed -> reactivate), fixes last_seen_batch_id/at on any row this
+// batch silently re-confirmed with no changes (so no dangling reference to the batch we're
+// about to delete), then removes the batch's history and the batch record itself.
+async function deleteGenPoBatch(batchId){
+  const batches = state.genPoRecentBatches || [];
+  if(!batches.length || String(batches[0].id) !== String(batchId)){
+    throw new Error('Can only delete the most recent upload.');
+  }
+  const prevBatch = batches[1] || null;
+
+  showProgress('Loading this upload\'s history…', 10);
+  const { data: historyRows, error: histErr } = await sb.from('gen_po_line_history').select('*').eq('batch_id', batchId);
+  if(histErr) throw histErr;
+  const eventByKey = new Map(historyRows.map(ev=>[ev.line_key, ev]));
+
+  const { data: touchedLines, error: touchedErr } = await sb.from('gen_po_lines').select('*').eq('last_seen_batch_id', batchId);
+  if(touchedErr) throw touchedErr;
+
+  const toDelete = [];
+  const toUpdate = [];
+  touchedLines.forEach(row=>{
+    const ev = eventByKey.get(row.line_key);
+    if(ev && ev.event_type === 'created'){ toDelete.push(row.line_key); return; }
+    const fields = {};
+    if(prevBatch){ fields.last_seen_batch_id = prevBatch.id; fields.last_seen_at = prevBatch.uploaded_at; }
+    else { fields.last_seen_batch_id = row.first_seen_batch_id; fields.last_seen_at = row.first_seen_at; }
+    if(ev && (ev.event_type === 'updated' || ev.event_type === 'reappeared')){
+      (ev.changes||[]).forEach(c=>{ fields[c.field] = c.old; });
+      if(ev.event_type === 'reappeared') fields.is_active = false;
+    }
+    toUpdate.push({ line_key: row.line_key, fields });
+  });
+  // 'closed' events never touch last_seen_batch_id (see processGenPoUpload), so those rows
+  // won't be in touchedLines - find them from the history rows directly.
+  const closedKeys = historyRows.filter(ev=>ev.event_type==='closed').map(ev=>ev.line_key);
+
+  if(toDelete.length){
+    showProgress(`Removing ${toDelete.length.toLocaleString()} new lines…`, 25);
+    const { error } = await sb.from('gen_po_lines').delete().in('line_key', toDelete);
+    if(error) throw error;
+  }
+
+  const CONCURRENCY = 20;
+  for(let i=0; i<toUpdate.length; i+=CONCURRENCY){
+    const chunk = toUpdate.slice(i, i+CONCURRENCY);
+    await Promise.all(chunk.map(({line_key, fields})=>sb.from('gen_po_lines').update(fields).eq('line_key', line_key)));
+    showProgress(`Reverting lines… ${Math.min(i+CONCURRENCY, toUpdate.length).toLocaleString()} / ${toUpdate.length.toLocaleString()}`, 25 + (i/Math.max(toUpdate.length,1))*50);
+  }
+
+  if(closedKeys.length){
+    showProgress(`Reactivating ${closedKeys.length.toLocaleString()} closed lines…`, 80);
+    const { error } = await sb.from('gen_po_lines').update({ is_active: true }).in('line_key', closedKeys);
+    if(error) throw error;
+  }
+
+  showProgress('Removing history…', 90);
+  const { error: delHistErr } = await sb.from('gen_po_line_history').delete().eq('batch_id', batchId);
+  if(delHistErr) throw delHistErr;
+  const { error: delBatchErr } = await sb.from('report_batches').delete().eq('id', batchId);
+  if(delBatchErr) throw delBatchErr;
+  showProgress('Done.', 100);
 }
 
 function exportGenPoCsv(){
@@ -3330,8 +3455,7 @@ function attachViewHandlers(){
 }
 
 function attachGenPoHandlers(){
-  const activeBatch = getActiveGenPoBatch();
-  if(activeBatch) ensureGenPoBatchDiffLoaded(activeBatch.id);
+  if(state.selectedGenPoBatchId) ensureGenPoBatchDiffLoaded(state.selectedGenPoBatchId);
   document.querySelectorAll('.genpo-calendar-day').forEach(el=>{
     el.addEventListener('click', ()=>{
       const batchId = el.dataset.batchId;
@@ -3342,6 +3466,9 @@ function attachGenPoHandlers(){
   document.getElementById('clearGenPoBatchSelectionBtn')?.addEventListener('click', ()=>{
     state.selectedGenPoBatchId = null;
     render();
+  });
+  document.getElementById('deleteGenPoBatchBtn')?.addEventListener('click', ()=>{
+    if(state.selectedGenPoBatchId) openDeleteGenPoBatchConfirmModal(state.selectedGenPoBatchId);
   });
   const gdz = document.getElementById('genPoDropzone');
   if(gdz){
