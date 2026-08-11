@@ -260,7 +260,10 @@ const state = {
   stagedGenPoFile: null, // File object, staged while its sheet is being detected/parsed
   stagedGenPoPreview: null, // { sheetName, rowCount, dataRows } once parsing succeeds
   genPoStageError: null,
-  genPoBatchDates: new Set() // 'YYYY-MM-DD' dates with at least one upload, for the calendar strip
+  genPoRecentBatches: [], // recent report_batches rows for gen_po, desc by uploaded_at - powers the calendar + the diff/raw-data panel below it
+  selectedGenPoBatchId: null, // batch clicked on the calendar; null = default view (latest upload vs. the one before it)
+  genPoBatchDiffCache: {}, // batch_id -> resolved diff rows (history events joined to current line info), loaded on demand
+  genPoBatchDiffFetching: new Set() // batch_ids currently being fetched, so we don't re-request mid-flight
 };
 
 // ---------- identity ("who's using this" - a name-select for audit attribution, not a real login) ----------
@@ -394,15 +397,16 @@ async function loadLastGenPoBatch(){
   return (data && data[0]) || null;
 }
 
-// Set of 'YYYY-MM-DD' dates (local time) that had at least one Gen PO upload, for the
-// upload-history calendar strip. 21 calendar days comfortably covers the last 7 business days.
-async function loadRecentGenPoBatchDates(){
-  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 21);
-  const { data, error } = await sb.from('report_batches').select('uploaded_at').eq('report_type', 'gen_po').gte('uploaded_at', cutoff.toISOString());
+// Recent gen_po upload batches, newest first. Powers both the upload-history calendar strip
+// (which dates had an upload) and the diff/raw-data panel below it (which batch to compare
+// against which). 30 batches comfortably covers the last 7 business days plus room to find
+// "the batch right before this one" even after a gap in uploads.
+async function loadRecentGenPoBatches(){
+  const { data, error } = await sb.from('report_batches')
+    .select('id,uploaded_at,source_filename,row_count').eq('report_type', 'gen_po')
+    .order('uploaded_at', { ascending: false }).limit(30);
   if(error) throw error;
-  const set = new Set();
-  data.forEach(b=>set.add(toDateStr(new Date(b.uploaded_at))));
-  return set;
+  return data || [];
 }
 
 // ---------- ETA changes (promise-date pushes across recent uploads) ----------
@@ -637,7 +641,7 @@ async function saveLastSalesUpload(filename){
 
 async function refreshData(){
   document.getElementById('lastUpdated').textContent = 'Loading…';
-  const [lines, batch, settings, genPoLines, genPoBatch, genPoBatchDates] = await Promise.all([loadAll(), loadLastBatch(), loadAppSettings(), loadAllGenPo(), loadLastGenPoBatch(), loadRecentGenPoBatchDates()]);
+  const [lines, batch, settings, genPoLines, genPoBatch, genPoRecentBatches] = await Promise.all([loadAll(), loadLastBatch(), loadAppSettings(), loadAllGenPo(), loadLastGenPoBatch(), loadRecentGenPoBatches()]);
   state.poLines = lines;
   state.lastBatch = batch;
   state.dateBufferDays = settings.date_buffer_days || 0;
@@ -647,7 +651,10 @@ async function refreshData(){
   state.lastSalesUploadFilename = settings.last_sales_upload_filename || null;
   state.genPoLines = genPoLines;
   state.lastGenPoBatch = genPoBatch;
-  state.genPoBatchDates = genPoBatchDates;
+  state.genPoRecentBatches = genPoRecentBatches;
+  // A fresh upload invalidates any cached diff that included the previous "latest" batch as its
+  // comparison point, and the newly-created batch obviously isn't cached yet either.
+  state.genPoBatchDiffCache = {};
   state.loadedAt = new Date();
   document.getElementById('lastUpdated').textContent = batch
     ? `Last upload: ${new Date(batch.uploaded_at).toLocaleString()} · ${batch.row_count} open POs`
@@ -1318,25 +1325,171 @@ function lastNBusinessDays(n, endDate){
   return days;
 }
 
+// Latest batch per calendar date (local time), from the recent-batches list. If a date somehow
+// got two uploads, the list is already newest-first so the first match wins.
+function genPoBatchesByDate(){
+  const map = new Map();
+  (state.genPoRecentBatches || []).forEach(b=>{
+    const key = toDateStr(new Date(b.uploaded_at));
+    if(!map.has(key)) map.set(key, b);
+  });
+  return map;
+}
+
 function renderGenPoUploadCalendar(){
   const days = lastNBusinessDays(7, new Date());
-  const uploadedDates = state.genPoBatchDates || new Set();
+  const batchesByDate = genPoBatchesByDate();
   return `
     <div style="margin-top:12px;">
-      <div style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700;margin-bottom:7px;">Last 7 business days</div>
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700;margin-bottom:7px;">Last 7 business days — click a day to see that upload's raw data</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         ${days.map(dateStr=>{
           const d = parseDateStr(dateStr);
           const label = d.toLocaleDateString('en-US', { weekday: 'short' }) + ' ' + (d.getMonth()+1) + '/' + d.getDate();
-          const uploaded = uploadedDates.has(dateStr);
+          const batch = batchesByDate.get(dateStr);
+          const uploaded = !!batch;
+          const selected = uploaded && String(state.selectedGenPoBatchId)===String(batch.id);
           return `
-            <div style="flex:1;min-width:66px;text-align:center;border:1px solid ${uploaded?'var(--good)':'var(--border)'};border-radius:8px;padding:8px 4px;background:${uploaded?'var(--good-bg)':'#fafbfc'};">
+            <div class="${uploaded?'genpo-calendar-day':''}" ${uploaded?`data-batch-id="${batch.id}"`:''} style="flex:1;min-width:66px;text-align:center;border:1px solid ${selected?'var(--accent)':uploaded?'var(--good)':'var(--border)'};border-radius:8px;padding:8px 4px;background:${selected?'#e3ecfd':uploaded?'var(--good-bg)':'#fafbfc'};${uploaded?'cursor:pointer;':''}">
               <div style="font-size:11px;color:var(--muted);font-weight:700;">${label}</div>
               <div style="font-size:16px;margin-top:3px;">${uploaded ? '✅' : '<span style="color:var(--bad);">✗</span>'}</div>
             </div>
           `;
         }).join('')}
       </div>
+      ${renderGenPoBatchDiffPanel()}
+    </div>
+  `;
+}
+
+// The batch immediately before the given one, by upload time - what a clicked day's raw data
+// (or the default view) gets diffed against.
+function genPoPrevBatch(batchId){
+  const list = state.genPoRecentBatches || [];
+  const idx = list.findIndex(b=>String(b.id)===String(batchId));
+  if(idx === -1) return null;
+  return list[idx+1] || null;
+}
+
+function getActiveGenPoBatch(){
+  const batches = state.genPoRecentBatches || [];
+  if(!batches.length) return null;
+  if(!state.selectedGenPoBatchId) return batches[0];
+  return batches.find(b=>String(b.id)===String(state.selectedGenPoBatchId)) || batches[0];
+}
+
+async function loadGenPoBatchDiff(batchId){
+  const { data, error } = await sb.from('gen_po_line_history').select('*').eq('batch_id', batchId);
+  if(error) throw error;
+  const linesByKey = new Map(state.genPoLines.map(r=>[r.line_key, r]));
+  return data.map(ev=>({ ...ev, line: linesByKey.get(ev.line_key) || null }));
+}
+
+// Kicks off the fetch for a batch's diff if it isn't cached (or already in flight) yet, then
+// re-renders when it lands. Called from the attach step so it fires on every render pass of the
+// Gen PO tab - including the very first one, with nothing clicked - not just after a click.
+function ensureGenPoBatchDiffLoaded(batchId){
+  if(!batchId || state.genPoBatchDiffCache[batchId] || state.genPoBatchDiffFetching.has(batchId)) return;
+  state.genPoBatchDiffFetching.add(batchId);
+  loadGenPoBatchDiff(batchId).then(rows=>{
+    state.genPoBatchDiffCache[batchId] = rows;
+    state.genPoBatchDiffFetching.delete(batchId);
+    render();
+  }).catch(err=>{
+    console.error(err);
+    state.genPoBatchDiffFetching.delete(batchId);
+  });
+}
+
+const GENPO_EVENT_SECTIONS = [
+  { type: 'created', label: 'New lines' },
+  { type: 'reappeared', label: 'Reappeared' },
+  { type: 'updated', label: 'Changed' },
+  { type: 'closed', label: 'Closed' }
+];
+
+const GENPO_FIELD_LABELS = {
+  supplier: 'Supplier', sc: 'SC', pc: 'Product Category', style_item: 'Style/Item', color_desc: 'Color/Desc',
+  roll_item_number: 'Roll/Item #', width: 'Width', length: 'Length', item_size: 'Item Size', qty: 'Qty',
+  units: 'Units', unit_cost: 'Unit Cost', total_cost: 'Total Cost', sku: 'SKU', install_date: 'Install Date',
+  key_date: 'Key Date', line_del_date: 'Line Del Date', job_number: 'Job Number', matched_inventory: 'Matched Inventory',
+  hold_type: 'Hold Type', seq_num: 'Seq #', is_stock_item: 'Stock Item'
+};
+function fmtGenPoDiffValue(field, v){
+  if(v===null || v===undefined || v==='') return '—';
+  if(field==='install_date' || field==='key_date' || field==='line_del_date') return fmtDate(v);
+  if(field==='unit_cost' || field==='total_cost') return fmtMoney(v);
+  if(field==='is_stock_item') return v ? 'Yes' : 'No';
+  if(field==='pc') return pcLabel(v);
+  return escapeAttr(v);
+}
+
+function renderGenPoDiffRowLine(ev){
+  const l = ev.line;
+  if(!l) return `<span style="color:var(--muted);">${escapeAttr(ev.line_key)} (no longer on file)</span>`;
+  return `${escapeAttr(l.supplier||'')} · ${escapeAttr(l.style_item||'')}${l.color_desc?(' · '+escapeAttr(l.color_desc)):''} · Order ${escapeAttr(l.order_number)}-${l.line} · Qty ${l.qty!=null?Number(l.qty).toLocaleString():'—'} · ${fmtMoney(l.total_cost)}`;
+}
+
+function renderGenPoDiffTable(diffRows){
+  const byType = new Map();
+  diffRows.forEach(ev=>{
+    if(!byType.has(ev.event_type)) byType.set(ev.event_type, []);
+    byType.get(ev.event_type).push(ev);
+  });
+  const sections = GENPO_EVENT_SECTIONS.map(({type,label})=>{
+    const evs = byType.get(type) || [];
+    if(!evs.length) return '';
+    return `
+      <div style="margin-bottom:12px;">
+        <div style="font-size:11.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">${label} (${evs.length})</div>
+        <div class="timeline">
+          ${evs.map(ev=>`
+            <div class="tl-event">
+              <div class="tl-diff">${renderGenPoDiffRowLine(ev)}</div>
+              ${ev.event_type==='updated' ? (ev.changes||[]).map(c=>`<div class="tl-diff"><span class="f">${escapeAttr(GENPO_FIELD_LABELS[c.field]||c.field)}:</span> ${fmtGenPoDiffValue(c.field,c.old)} → <strong>${fmtGenPoDiffValue(c.field,c.new)}</strong></div>`).join('') : ''}
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }).join('');
+  return sections || `<p class="empty">No changes between these two uploads.</p>`;
+}
+
+function renderGenPoBatchDiffPanel(){
+  const activeBatch = getActiveGenPoBatch();
+  if(!activeBatch) return '';
+  const isDefault = !state.selectedGenPoBatchId;
+  const prevBatch = genPoPrevBatch(activeBatch.id);
+  const diffRows = state.genPoBatchDiffCache[activeBatch.id];
+
+  const activeLabel = new Date(activeBatch.uploaded_at).toLocaleString();
+  const prevLabel = prevBatch ? new Date(prevBatch.uploaded_at).toLocaleString() : null;
+
+  const heading = isDefault
+    ? (prevBatch
+        ? `Showing differences between the two most recent uploads: <strong>${escapeAttr(activeLabel)}</strong> vs. <strong>${escapeAttr(prevLabel)}</strong>`
+        : `Only one upload on record (<strong>${escapeAttr(activeLabel)}</strong>) — nothing to compare yet.`)
+    : (prevBatch
+        ? `Raw data from the <strong>${escapeAttr(activeLabel)}</strong> upload, compared to the prior upload on <strong>${escapeAttr(prevLabel)}</strong>`
+        : `Raw data from the <strong>${escapeAttr(activeLabel)}</strong> upload — it was the first one on record, nothing to compare it to.`);
+
+  let body;
+  if(!prevBatch){
+    body = '';
+  } else if(!diffRows){
+    body = `<p class="empty">Loading…</p>`;
+  } else {
+    body = renderGenPoDiffTable(diffRows);
+  }
+
+  return `
+    <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+        <div style="font-size:12.5px;color:var(--muted);">${heading}</div>
+        ${!isDefault ? `<button type="button" class="btn secondary" id="clearGenPoBatchSelectionBtn">Clear</button>` : ''}
+      </div>
+      ${body}
     </div>
   `;
 }
@@ -3177,6 +3330,19 @@ function attachViewHandlers(){
 }
 
 function attachGenPoHandlers(){
+  const activeBatch = getActiveGenPoBatch();
+  if(activeBatch) ensureGenPoBatchDiffLoaded(activeBatch.id);
+  document.querySelectorAll('.genpo-calendar-day').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const batchId = el.dataset.batchId;
+      state.selectedGenPoBatchId = String(state.selectedGenPoBatchId)===String(batchId) ? null : batchId;
+      render();
+    });
+  });
+  document.getElementById('clearGenPoBatchSelectionBtn')?.addEventListener('click', ()=>{
+    state.selectedGenPoBatchId = null;
+    render();
+  });
   const gdz = document.getElementById('genPoDropzone');
   if(gdz){
     const genPoFileInput = document.getElementById('genPoFileInput');
