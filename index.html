@@ -1363,8 +1363,49 @@ function renderGenPo(){
 
   return `
     <div class="panel">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;margin-bottom:${state.stagedGenPoFile ? '10px' : '0'};">
+        <div style="flex:1;min-width:260px;">
+          <h2 style="margin:0 0 4px;font-size:15px;">Upload today's file</h2>
+          <p style="color:var(--muted);font-size:12.5px;margin:0;">Drop the Outstanding Gen PO Lines.xlsx export. Finds the current sheet itself (prefers "today", falls back with a picker) and tracks new/resolved lines on its own.</p>
+        </div>
+        <p style="color:var(--muted);font-size:12.5px;font-style:italic;margin:0;white-space:nowrap;">${state.lastGenPoBatch ? `Last uploaded: ${new Date(state.lastGenPoBatch.uploaded_at).toLocaleString()}` : 'Never uploaded yet.'}</p>
+      </div>
+      ${state.stagedGenPoFile ? `
+        ${state.genPoStageError ? `
+          <div class="dropzone" style="border-color:var(--bad);background:var(--bad-bg);color:var(--bad);">
+            ✗ ${escapeAttr(state.genPoStageError)}
+          </div>
+        ` : state.stagedGenPoPreview ? (()=>{
+          const { candidates, selectedSheetName } = state.stagedGenPoPreview;
+          const selected = candidates.find(c=>c.name === selectedSheetName);
+          return `
+          <div class="dropzone" style="border-color:var(--good);background:var(--good-bg);color:var(--good);">
+            ✓ ${escapeAttr(state.stagedGenPoFile.name)} — found ${(selected?.dataRowCount||0).toLocaleString()} rows on sheet "${escapeAttr(selectedSheetName)}"
+          </div>
+          ${candidates.length > 1 ? `
+            <label style="display:block;font-size:12px;color:var(--muted);margin:10px 0 4px;">Found ${candidates.length} matching tabs — pick the right one:</label>
+            <select id="genPoSheetSelect" style="padding:7px 10px;border:1px solid var(--border);border-radius:7px;">
+              ${candidates.map(c=>`<option value="${escapeAttr(c.name)}" ${c.name===selectedSheetName?'selected':''}>${escapeAttr(c.name)} (${c.dataRowCount.toLocaleString()} rows)</option>`).join('')}
+            </select>
+          ` : ''}
+          ${selectedSheetName.toLowerCase() !== 'today' ? `<p style="color:var(--warn);font-size:12.5px;">⚠ This isn't the "today" tab — double check it's the sheet you meant to upload.</p>` : ''}
+        `; })() : `
+          <div class="dropzone">Reading file…</div>
+        `}
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button type="button" class="btn secondary" id="clearGenPoFileBtn">Choose a different file</button>
+          <button type="button" class="btn" id="confirmGenPoUploadBtn" ${state.stagedGenPoPreview ? '' : 'disabled'}>Confirm &amp; Upload</button>
+        </div>
+      ` : `
+        <div class="dropzone" id="genPoDropzone" style="padding:20px;margin-top:10px;">
+          <input type="file" id="genPoFileInput" accept=".xlsx,.xls,.xlsm" class="hidden">
+          Drag &amp; drop Outstanding Gen PO Lines.xlsx here, or click to choose a file
+        </div>
+      `}
+    </div>
+    <div class="panel">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:10px;">
-        <p style="color:var(--muted);font-size:12.5px;font-style:italic;margin:0;">${state.lastGenPoBatch ? `Last uploaded: ${new Date(state.lastGenPoBatch.uploaded_at).toLocaleString()}${state.lastGenPoBatch.source_filename ? ` (${escapeAttr(state.lastGenPoBatch.source_filename)})` : ''}` : 'Never uploaded yet.'}</p>
+        <p style="color:var(--muted);font-size:12.5px;font-style:italic;margin:0;">${rows.length.toLocaleString()} outstanding line${rows.length===1?'':'s'}</p>
         <div>
           <span style="font-weight:700;font-size:12.5px;margin-right:8px;">Stock:</span>
           <div class="toggle-group" id="genPoStockToggle" style="display:inline-flex;">
@@ -1988,43 +2029,6 @@ function renderUpload(){
       ${(!listingReady || !summaryReady) ? `<p style="color:var(--muted);font-size:12.5px;margin-top:8px;">Still needed: ${[!listingReady?'Purchase Order Listing Report':null, !summaryReady?'PO Summary Report':null].filter(Boolean).join(', ')}</p>` : ''}
     </div>
     <div class="panel">
-      <h2 style="margin-top:0;">Upload Outstanding Gen PO Lines</h2>
-      <p style="color:var(--muted);font-size:13px;">Drop the Outstanding Gen PO Lines.xlsx export. The app finds the sheet with current data itself (it prefers a sheet named "today", falling back to whichever matching sheet has the most rows) and tracks new / resolved lines on its own — the workbook's own per-date tabs don't need to be kept up for this.</p>
-      <p style="color:var(--muted);font-size:12.5px;font-style:italic;">${state.lastGenPoBatch ? `Last uploaded: ${new Date(state.lastGenPoBatch.uploaded_at).toLocaleString()}${state.lastGenPoBatch.source_filename ? ` (${escapeAttr(state.lastGenPoBatch.source_filename)})` : ''}` : 'Never uploaded yet.'}</p>
-      ${state.stagedGenPoFile ? `
-        ${state.genPoStageError ? `
-          <div class="dropzone" style="border-color:var(--bad);background:var(--bad-bg);color:var(--bad);">
-            ✗ ${escapeAttr(state.genPoStageError)}
-          </div>
-        ` : state.stagedGenPoPreview ? (()=>{
-          const { candidates, selectedSheetName } = state.stagedGenPoPreview;
-          const selected = candidates.find(c=>c.name === selectedSheetName);
-          return `
-          <div class="dropzone" style="border-color:var(--good);background:var(--good-bg);color:var(--good);">
-            ✓ ${escapeAttr(state.stagedGenPoFile.name)} — found ${(selected?.dataRowCount||0).toLocaleString()} rows on sheet "${escapeAttr(selectedSheetName)}"
-          </div>
-          ${candidates.length > 1 ? `
-            <label style="display:block;font-size:12px;color:var(--muted);margin:10px 0 4px;">Sheet found ${candidates.length} matching tabs — pick the right one:</label>
-            <select id="genPoSheetSelect" style="padding:7px 10px;border:1px solid var(--border);border-radius:7px;">
-              ${candidates.map(c=>`<option value="${escapeAttr(c.name)}" ${c.name===selectedSheetName?'selected':''}>${escapeAttr(c.name)} (${c.dataRowCount.toLocaleString()} rows)</option>`).join('')}
-            </select>
-          ` : ''}
-          ${selectedSheetName.toLowerCase() !== 'today' ? `<p style="color:var(--warn);font-size:12.5px;">⚠ This isn't the "today" tab — double check it's the sheet you meant to upload.</p>` : ''}
-        `; })() : `
-          <div class="dropzone">Reading file…</div>
-        `}
-        <div style="display:flex;gap:8px;margin-top:10px;">
-          <button type="button" class="btn secondary" id="clearGenPoFileBtn">Choose a different file</button>
-          <button type="button" class="btn" id="confirmGenPoUploadBtn" ${state.stagedGenPoPreview ? '' : 'disabled'}>Confirm &amp; Upload</button>
-        </div>
-      ` : `
-        <div class="dropzone" id="genPoDropzone">
-          <input type="file" id="genPoFileInput" accept=".xlsx,.xls,.xlsm" class="hidden">
-          Drag &amp; drop Outstanding Gen PO Lines.xlsx here, or click to choose a file
-        </div>
-      `}
-    </div>
-    <div class="panel">
       <h2 style="margin-top:0;">Upload Sales Data</h2>
       <p style="color:var(--muted);font-size:13px;">Drop either the raw "Open Orders Detailed" export (.xlsx) from RFMS, or the combined CSV produced by the offline ExtractSalesData.ps1 script (recommended - run it against a folder of exports first to check the data before it goes anywhere near this app). Matches each order to POs by order number and fills in Sales Person, Entered By, and Division - shown as a tooltip when you hover a PO number on All Open POs. Independent of the two reports above; uploads immediately.</p>
       <p style="color:var(--muted);font-size:12.5px;font-style:italic;">${state.lastSalesUploadAt ? `Last uploaded: ${new Date(state.lastSalesUploadAt).toLocaleString()}${state.lastSalesUploadFilename ? ` (${state.lastSalesUploadFilename})` : ''}` : 'Never uploaded yet.'}</p>
@@ -2070,18 +2074,6 @@ function attachUploadHandlers(){
     rdz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f){ state.stagedSummaryFile = f; render(); } });
   }
   document.getElementById('clearSummaryFileBtn')?.addEventListener('click', ()=>{ state.stagedSummaryFile = null; render(); });
-  const gdz = document.getElementById('genPoDropzone');
-  if(gdz){
-    const genPoFileInput = document.getElementById('genPoFileInput');
-    gdz.addEventListener('click', ()=>genPoFileInput.click());
-    genPoFileInput.addEventListener('change', (e)=>{ if(e.target.files[0]) stageGenPoFile(e.target.files[0]); });
-    ['dragenter','dragover'].forEach(ev=>gdz.addEventListener(ev, (e)=>{ e.preventDefault(); gdz.classList.add('drag'); }));
-    ['dragleave','drop'].forEach(ev=>gdz.addEventListener(ev, (e)=>{ e.preventDefault(); gdz.classList.remove('drag'); }));
-    gdz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f) stageGenPoFile(f); });
-  }
-  document.getElementById('clearGenPoFileBtn')?.addEventListener('click', clearGenPoStagedFile);
-  document.getElementById('confirmGenPoUploadBtn')?.addEventListener('click', confirmGenPoUpload);
-  document.getElementById('genPoSheetSelect')?.addEventListener('change', (e)=>{ state.stagedGenPoPreview.selectedSheetName = e.target.value; render(); });
   const sdz = document.getElementById('salesDropzone');
   if(sdz){
     const salesFileInput = document.getElementById('salesFileInput');
@@ -3109,6 +3101,18 @@ function attachViewHandlers(){
 }
 
 function attachGenPoHandlers(){
+  const gdz = document.getElementById('genPoDropzone');
+  if(gdz){
+    const genPoFileInput = document.getElementById('genPoFileInput');
+    gdz.addEventListener('click', ()=>genPoFileInput.click());
+    genPoFileInput.addEventListener('change', (e)=>{ if(e.target.files[0]) stageGenPoFile(e.target.files[0]); });
+    ['dragenter','dragover'].forEach(ev=>gdz.addEventListener(ev, (e)=>{ e.preventDefault(); gdz.classList.add('drag'); }));
+    ['dragleave','drop'].forEach(ev=>gdz.addEventListener(ev, (e)=>{ e.preventDefault(); gdz.classList.remove('drag'); }));
+    gdz.addEventListener('drop', (e)=>{ const f = e.dataTransfer.files[0]; if(f) stageGenPoFile(f); });
+  }
+  document.getElementById('clearGenPoFileBtn')?.addEventListener('click', clearGenPoStagedFile);
+  document.getElementById('confirmGenPoUploadBtn')?.addEventListener('click', confirmGenPoUpload);
+  document.getElementById('genPoSheetSelect')?.addEventListener('change', (e)=>{ state.stagedGenPoPreview.selectedSheetName = e.target.value; render(); });
   document.querySelectorAll('tr.genpo-row').forEach(tr=>{
     tr.addEventListener('click', ()=>openGenPoHistoryModal(tr.dataset.key));
   });
