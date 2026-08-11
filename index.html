@@ -259,7 +259,8 @@ const state = {
   showAllGenPoRows: false,
   stagedGenPoFile: null, // File object, staged while its sheet is being detected/parsed
   stagedGenPoPreview: null, // { sheetName, rowCount, dataRows } once parsing succeeds
-  genPoStageError: null
+  genPoStageError: null,
+  genPoBatchDates: new Set() // 'YYYY-MM-DD' dates with at least one upload, for the calendar strip
 };
 
 // ---------- identity ("who's using this" - a name-select for audit attribution, not a real login) ----------
@@ -391,6 +392,17 @@ async function loadLastGenPoBatch(){
   const { data, error } = await sb.from('report_batches').select('*').eq('report_type', 'gen_po').order('uploaded_at', { ascending:false }).limit(1);
   if(error) throw error;
   return (data && data[0]) || null;
+}
+
+// Set of 'YYYY-MM-DD' dates (local time) that had at least one Gen PO upload, for the
+// upload-history calendar strip. 21 calendar days comfortably covers the last 7 business days.
+async function loadRecentGenPoBatchDates(){
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 21);
+  const { data, error } = await sb.from('report_batches').select('uploaded_at').eq('report_type', 'gen_po').gte('uploaded_at', cutoff.toISOString());
+  if(error) throw error;
+  const set = new Set();
+  data.forEach(b=>set.add(toDateStr(new Date(b.uploaded_at))));
+  return set;
 }
 
 // ---------- ETA changes (promise-date pushes across recent uploads) ----------
@@ -625,7 +637,7 @@ async function saveLastSalesUpload(filename){
 
 async function refreshData(){
   document.getElementById('lastUpdated').textContent = 'Loading…';
-  const [lines, batch, settings, genPoLines, genPoBatch] = await Promise.all([loadAll(), loadLastBatch(), loadAppSettings(), loadAllGenPo(), loadLastGenPoBatch()]);
+  const [lines, batch, settings, genPoLines, genPoBatch, genPoBatchDates] = await Promise.all([loadAll(), loadLastBatch(), loadAppSettings(), loadAllGenPo(), loadLastGenPoBatch(), loadRecentGenPoBatchDates()]);
   state.poLines = lines;
   state.lastBatch = batch;
   state.dateBufferDays = settings.date_buffer_days || 0;
@@ -635,6 +647,7 @@ async function refreshData(){
   state.lastSalesUploadFilename = settings.last_sales_upload_filename || null;
   state.genPoLines = genPoLines;
   state.lastGenPoBatch = genPoBatch;
+  state.genPoBatchDates = genPoBatchDates;
   state.loadedAt = new Date();
   document.getElementById('lastUpdated').textContent = batch
     ? `Last upload: ${new Date(batch.uploaded_at).toLocaleString()} · ${batch.row_count} open POs`
@@ -1292,6 +1305,42 @@ function genPoAgeBucket(days){
   return 'b21';
 }
 
+// Last n weekdays (Mon-Fri, no holiday awareness) up to and including endDate, oldest first.
+function lastNBusinessDays(n, endDate){
+  const days = [];
+  const d = new Date(endDate);
+  d.setHours(0,0,0,0);
+  while(days.length < n){
+    const dow = d.getDay();
+    if(dow !== 0 && dow !== 6) days.unshift(toDateStr(d));
+    d.setDate(d.getDate() - 1);
+  }
+  return days;
+}
+
+function renderGenPoUploadCalendar(){
+  const days = lastNBusinessDays(7, new Date());
+  const uploadedDates = state.genPoBatchDates || new Set();
+  return `
+    <div style="margin-top:12px;">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700;margin-bottom:7px;">Last 7 business days</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        ${days.map(dateStr=>{
+          const d = parseDateStr(dateStr);
+          const label = d.toLocaleDateString('en-US', { weekday: 'short' }) + ' ' + (d.getMonth()+1) + '/' + d.getDate();
+          const uploaded = uploadedDates.has(dateStr);
+          return `
+            <div style="flex:1;min-width:66px;text-align:center;border:1px solid ${uploaded?'var(--good)':'var(--border)'};border-radius:8px;padding:8px 4px;background:${uploaded?'var(--good-bg)':'#fafbfc'};">
+              <div style="font-size:11px;color:var(--muted);font-weight:700;">${label}</div>
+              <div style="font-size:16px;margin-top:3px;">${uploaded ? '✅' : '<span style="color:var(--bad);">✗</span>'}</div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
 function matchesGenPoFilters(r, filters, excludeDim){
   if(filters.activeOnly && !r.is_active) return false;
   // The report's whole purpose is spotting lines that persist across uploads, not lines that
@@ -1424,6 +1473,7 @@ function renderGenPo(){
           Drag &amp; drop Outstanding Gen PO Lines.xlsx here, or click to choose a file
         </div>
       `}
+      ${renderGenPoUploadCalendar()}
     </div>
     <div class="panel">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:10px;">
