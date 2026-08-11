@@ -144,24 +144,34 @@ const ADMIN_PW = 'afs2026'; // change this to whatever you like
 
 
 const GOALS = {
-  dollars: { current: 0.90, b7: 0.10, b14: 0.00, b21: 0.00, b28: 0.00, blank: 0.00 },
-  count:   { current: 0.63, b7: 0.10, b14: 0.05, b21: 0.01, b28: 0.01, blank: 0.20 }
+  dollars: { current: 0.72, b7: 0.10, b14: 0.03, b21: 0.00, b28: 0.00, blank: 0.15 },
+  count:   { current: 0.72, b7: 0.10, b14: 0.03, b21: 0.00, b28: 0.00, blank: 0.15 }
 };
 
 // How much each bucket counts toward the overall composite score. Tune freely — must sum to 1.
 const IMPORTANCE = { current: 0.24, b7: 0.07, b14: 0.10, b21: 0.20, b28: 0.25, blank: 0.14 };
-const OVERALL_SCORE_GOAL = 0.82; // target composite score
+const OVERALL_SCORE_GOAL = 0.90; // target composite score
 
-// Continuous 0-100% credit instead of a flat pass/fail: partial credit scales with how close
-// actual is to goal, so "barely missed" and "way over goal" don't score identically.
+// Hitting the goal exactly scores 90; maxing out (100% current, or 0% on a past-due bucket)
+// scores 100, scaling linearly between the two. Missing the goal scales 0-90 the same way
+// scoring used to scale 0-100, just compressed to leave room above for "beat the goal."
 function scoreFor(bucketKey, actualPct, goalPct){
-  if(bucketKey === 'current'){
-    if(goalPct <= 0) return 1;
-    return Math.max(0, Math.min(1, actualPct / goalPct));
+  const isCurrent = bucketKey === 'current';
+  const maxPct = isCurrent ? 1 : 0; // best-possible value for this bucket
+  const metGoal = isCurrent ? actualPct >= goalPct : actualPct <= goalPct;
+
+  if(metGoal){
+    const span = Math.abs(maxPct - goalPct);
+    if(span <= 0) return 1; // goal already IS the max (e.g. a 0% goal)
+    const t = Math.max(0, Math.min(1, Math.abs(actualPct - goalPct) / span));
+    return 0.90 + 0.10 * t;
   }
-  if(actualPct <= goalPct) return 1;
+  if(isCurrent){
+    if(goalPct <= 0) return 0.90;
+    return 0.90 * Math.max(0, Math.min(1, actualPct / goalPct));
+  }
   if(goalPct <= 0) return 0;
-  return Math.max(0, Math.min(1, goalPct / actualPct));
+  return 0.90 * Math.max(0, Math.min(1, goalPct / actualPct));
 }
 
 const FIELDS_TO_COMPARE = ['store','supplier','product_code','style_name','color_desc','sidemark',
@@ -629,7 +639,12 @@ async function refreshData(){
   document.getElementById('lastUpdated').textContent = batch
     ? `Last upload: ${new Date(batch.uploaded_at).toLocaleString()} · ${batch.row_count} open POs`
     : 'No data uploaded yet';
+  // new upload data can change both of these, so drop the cached computations
+  state.vendorScorecardData = null;
+  state.changesData = null;
   render();
+  if(state.view === 'vendors') loadVendorScorecardAndRender();
+  else if(state.view === 'changes') loadEtaChangesAndRender();
 }
 
 // ---------- nav ----------
@@ -739,7 +754,7 @@ function render(){
 // ============================================================
 // SCORECARD (composite of the Total row, weighted by IMPORTANCE)
 // ============================================================
-function renderScorecard(totals, totalAll, goals){
+function renderScorecard(totals, totalAll, goals, poCounts){
   let composite = 0;
   const rowsHtml = BUCKET_ORDER.map(b=>{
     const actualPct = totalAll ? totals[b] / totalAll : 0;
@@ -753,7 +768,7 @@ function renderScorecard(totals, totalAll, goals){
     return `<tr>
       <td>${BUCKET_LABELS[b]}</td>
       <td>${goalDisplay}</td>
-      <td>${(actualPct*100).toFixed(1)}%</td>
+      <td title="${(poCounts[b]||0).toLocaleString()} PO${poCounts[b]===1?'':'s'}">${(actualPct*100).toFixed(2)}%</td>
       <td class="${scoreCls}">${(score*100).toFixed(0)}%</td>
       <td class="${impCls}">${(importance*100).toFixed(0)}%</td>
     </tr>`;
@@ -764,10 +779,15 @@ function renderScorecard(totals, totalAll, goals){
     <div class="panel">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:10px;">
         <h2 style="margin:0;font-size:15px;">Scorecard</h2>
-        <div style="font-size:13px;display:flex;align-items:center;gap:10px;">
+        <div style="font-size:13px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
           <span style="color:var(--muted);">Composite Score</span>
           <span class="${compositeCls}" style="padding:3px 10px;border-radius:20px;font-size:14px;">${(composite*100).toFixed(1)}%</span>
           <span style="color:var(--muted);">vs. target ${(OVERALL_SCORE_GOAL*100).toFixed(0)}%</span>
+          <span style="font-weight:700;margin-left:10px;">Scope:</span>
+          <div class="toggle-group rollup-scope-toggle">
+            <button data-scope="all" class="${state.rollupScope==='all'?'active':''}">All POs</button>
+            <button data-scope="purchasing" class="${state.rollupScope==='purchasing'?'active':''}">Purchasing Associates</button>
+          </div>
         </div>
       </div>
       <table>
@@ -799,9 +819,11 @@ function renderRollup(){
     g[bucket] += val;
   }
   const totals = { current:0, b7:0, b14:0, b21:0, b28:0, blank:0 };
+  const poCounts = { current:0, b7:0, b14:0, b21:0, b28:0, blank:0 }; // raw PO count per bucket, independent of the Dollars/Count metric toggle
   active.forEach(row=>{
     const bucket = bucketOf(row);
     totals[bucket] += state.rollupMetric === 'dollars' ? (Number(row.total_cost)||0) : 1;
+    poCounts[bucket]++;
   });
 
   const goals = GOALS[state.rollupMetric];
@@ -824,7 +846,7 @@ function renderRollup(){
       <div class="stat"><div class="num">${active.length.toLocaleString()}</div><div class="label">Open POs</div></div>
       <div class="stat"><div class="num">${fmtMoney(active.reduce((s,r)=>s+(Number(r.total_cost)||0),0))}</div><div class="label">Total $ Open</div></div>
     </div>
-    ${renderScorecard(totals, totalAll, goals)}
+    ${renderScorecard(totals, totalAll, goals, poCounts)}
     <div class="panel">
       <div class="toolbar">
         <span style="font-weight:700;">Metric:</span>
@@ -838,7 +860,7 @@ function renderRollup(){
           <button data-group="store" class="${state.rollupGroupBy==='store'?'active':''}">Store</button>
         </div>
         <span style="font-weight:700;margin-left:16px;">Scope:</span>
-        <div class="toggle-group" id="scopeToggle">
+        <div class="toggle-group rollup-scope-toggle">
           <button data-scope="all" class="${state.rollupScope==='all'?'active':''}">All POs</button>
           <button data-scope="purchasing" class="${state.rollupScope==='purchasing'?'active':''}">Purchasing Associates</button>
         </div>
@@ -2812,6 +2834,8 @@ async function savePromiseUpdate(poNumber){
       if(histErr) throw histErr;
       row.pending_promise_date = newDate;
     }
+    // a promise-date edit here can change the vendor scorecard's push-back calc, so drop the cache
+    state.vendorScorecardData = null;
     closeModal();
     render();
   } catch(err){
@@ -2951,9 +2975,11 @@ function attachViewHandlers(){
       const b = e.target.closest('button[data-group]'); if(!b) return;
       state.rollupGroupBy = b.dataset.group; render();
     });
-    document.getElementById('scopeToggle')?.addEventListener('click', (e)=>{
-      const b = e.target.closest('button[data-scope]'); if(!b) return;
-      state.rollupScope = b.dataset.scope; render();
+    document.querySelectorAll('.rollup-scope-toggle').forEach(toggle=>{
+      toggle.addEventListener('click', (e)=>{
+        const b = e.target.closest('button[data-scope]'); if(!b) return;
+        state.rollupScope = b.dataset.scope; render();
+      });
     });
   }
 
