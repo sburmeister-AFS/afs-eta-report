@@ -259,10 +259,10 @@ const state = {
   showAllGenPoRows: false,
   stagedGenPoFile: null, // File object, staged while its sheet is being detected/parsed
   stagedGenPoPreview: null, // { sheetName, rowCount, dataRows } once parsing succeeds
+  stagedGenPoUploadDate: null, // 'YYYY-MM-DD' the staged upload should be attributed to, set when staging begins
   genPoStageError: null,
   genPoRecentBatches: [], // recent report_batches rows for gen_po, desc by uploaded_at - powers the calendar + the diff/raw-data panel below it
-  selectedGenPoBatchId: null, // batch clicked on the calendar; null + !genPoDiffHidden = default view (latest upload vs. the one before it)
-  genPoDiffHidden: false, // true = panel showing nothing, reached via Clear/re-clicking the active day - distinct from "no day selected" (which still shows the default diff)
+  selectedGenPoBatchId: null, // batch clicked on the calendar; null = nothing shown below it
   genPoBatchDiffCache: {}, // batch_id -> resolved diff rows (history events joined to current line info), loaded on demand
   genPoBatchDiffFetching: new Set() // batch_ids currently being fetched, so we don't re-request mid-flight
 };
@@ -1617,6 +1617,15 @@ function renderGenPo(){
             </select>
           ` : ''}
           ${selectedSheetName.toLowerCase() !== 'today' ? `<p style="color:var(--warn);font-size:12.5px;">⚠ This isn't the "today" tab — double check it's the sheet you meant to upload.</p>` : ''}
+          <label style="display:block;font-size:12px;color:var(--muted);margin:10px 0 4px;">Which day does this upload apply to?</label>
+          <select id="genPoUploadDaySelect" style="padding:7px 10px;border:1px solid var(--border);border-radius:7px;">
+            ${lastNBusinessDays(7, new Date()).slice().reverse().map(dateStr=>{
+              const d = parseDateStr(dateStr);
+              const dayLabel = d.toLocaleDateString('en-US', { weekday: 'short' }) + ' ' + (d.getMonth()+1) + '/' + d.getDate();
+              return `<option value="${dateStr}" ${dateStr===state.stagedGenPoUploadDate?'selected':''}>${dayLabel}</option>`;
+            }).join('')}
+          </select>
+          ${genPoBatchesByDate().has(state.stagedGenPoUploadDate) ? `<p style="color:var(--warn);font-size:12.5px;">⚠ That day already has an upload — this will add a second one for the same day.</p>` : ''}
         `; })() : `
           <div class="dropzone">Reading file…</div>
         `}
@@ -2817,6 +2826,7 @@ function mapGenPoRow(r){
 async function stageGenPoFile(file){
   state.stagedGenPoFile = file;
   state.stagedGenPoPreview = null;
+  state.stagedGenPoUploadDate = toDateStr(new Date());
   state.genPoStageError = null;
   render();
   try{
@@ -2834,6 +2844,7 @@ async function stageGenPoFile(file){
 function clearGenPoStagedFile(){
   state.stagedGenPoFile = null;
   state.stagedGenPoPreview = null;
+  state.stagedGenPoUploadDate = null;
   state.genPoStageError = null;
   render();
 }
@@ -2843,12 +2854,14 @@ async function confirmGenPoUpload(){
   const sheetName = state.stagedGenPoPreview.selectedSheetName;
   const dataRows = genPoSelectedDataRows();
   const filename = state.stagedGenPoFile.name;
+  const uploadDate = state.stagedGenPoUploadDate || toDateStr(new Date());
   const btn = document.getElementById('confirmGenPoUploadBtn');
   if(btn) btn.disabled = true;
   try{
-    await processGenPoUpload(dataRows, filename, sheetName);
+    await processGenPoUpload(dataRows, filename, sheetName, uploadDate);
     state.stagedGenPoFile = null;
     state.stagedGenPoPreview = null;
+    state.stagedGenPoUploadDate = null;
   } catch(err){
     console.error(err);
     if(btn) btn.disabled = false;
@@ -2864,15 +2877,21 @@ async function upsertChunkedGenPo(rows, chunkSize){
   }
 }
 
-async function processGenPoUpload(uploadRowsRaw, filename, sheetName){
+async function processGenPoUpload(uploadRowsRaw, filename, sheetName, uploadDate){
   showProgress(`Parsed ${uploadRowsRaw.length.toLocaleString()} rows. Deduplicating…`, 20);
   const byKey = new Map();
   uploadRowsRaw.forEach(r=>byKey.set(r.line_key, r)); // last one wins if dup within file
   const uploadRows = Array.from(byKey.values());
 
+  // Noon UTC on the chosen day, not the real current time - the upload is being attributed to
+  // whichever business day the user picked (usually today, but not always if catching up), and
+  // every timestamp this batch produces (first/last_seen_at, history detected_at) should reflect
+  // that day, matching the convention the historical backfill used.
+  const nowIso = uploadDate ? `${uploadDate}T12:00:00.000Z` : new Date().toISOString();
+
   showProgress('Creating batch record…', 25);
   const { data: batchRow, error: batchErr } = await sb.from('report_batches')
-    .insert({ source_filename: `${filename} (${sheetName})`, row_count: uploadRows.length, report_type: 'gen_po' }).select().single();
+    .insert({ source_filename: `${filename} (${sheetName})`, row_count: uploadRows.length, report_type: 'gen_po', uploaded_at: nowIso }).select().single();
   if(batchErr) throw batchErr;
   const batchId = batchRow.id;
 
@@ -2880,7 +2899,6 @@ async function processGenPoUpload(uploadRowsRaw, filename, sheetName){
   const existing = await loadAllGenPo();
   const existingByKey = new Map(existing.map(r=>[r.line_key, r]));
   const seenKeySet = new Set(uploadRows.map(r=>r.line_key));
-  const nowIso = new Date().toISOString();
 
   const upserts = [];
   const historyEvents = [];
@@ -3482,6 +3500,7 @@ function attachGenPoHandlers(){
   document.getElementById('clearGenPoFileBtn')?.addEventListener('click', clearGenPoStagedFile);
   document.getElementById('confirmGenPoUploadBtn')?.addEventListener('click', confirmGenPoUpload);
   document.getElementById('genPoSheetSelect')?.addEventListener('change', (e)=>{ state.stagedGenPoPreview.selectedSheetName = e.target.value; render(); });
+  document.getElementById('genPoUploadDaySelect')?.addEventListener('change', (e)=>{ state.stagedGenPoUploadDate = e.target.value; render(); });
   document.querySelectorAll('tr.genpo-row').forEach(tr=>{
     tr.addEventListener('click', ()=>openGenPoHistoryModal(tr.dataset.key));
   });
