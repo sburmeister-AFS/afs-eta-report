@@ -76,6 +76,7 @@
   .badge.sev-intermediate{background:var(--warn-bg);color:var(--warn);}
   .badge.sev-slight{background:#eef1f6;color:var(--accent-dark);}
   .badge.sev-new{background:#e3ecfd;color:var(--accent-dark);}
+  .badge.sev-keydate_risk{background:var(--bad-bg);color:var(--bad);}
   .badge.grade-a{background:var(--good-bg);color:var(--good);}
   .badge.grade-b{background:#e3ecfd;color:var(--accent-dark);}
   .badge.grade-c{background:#eef0f4;color:var(--muted);}
@@ -416,12 +417,79 @@ async function loadRecentGenPoBatches(){
 // Bands mirror the app's existing past-due bucket spacing.
 const CHANGES_WINDOW_BATCHES = 5;
 const NEW_PO_LEAD_THRESHOLD_DAYS = 30; // flag a brand-new PO if its ETA is already more than this many days out
-const SEVERITY_LABELS = { new: 'New PO, 30+ Days Out', major: 'Major (28+ days)', intermediate: 'Intermediate (14-27 days)', slight: 'Slight (7-13 days)' };
-const SEVERITY_ORDER = ['new', 'major', 'intermediate', 'slight'];
+const KEY_DATE_RISK_BUFFER_DAYS = 3; // flag when a Builder job's material ETA leaves this many days (or fewer) before its Key Date
+const SEVERITY_LABELS = { new: 'New PO, 30+ Days Out', major: 'Major (28+ days)', intermediate: 'Intermediate (14-27 days)', slight: 'Slight (7-13 days)', keydate_risk: 'Key Date Risk (Builder)' };
+const SEVERITY_ORDER = ['new', 'major', 'intermediate', 'slight', 'keydate_risk'];
 function severityOf(deltaDays){
   if(deltaDays >= 28) return 'major';
   if(deltaDays >= 14) return 'intermediate';
   return 'slight'; // caller already filters out < 7
+}
+
+// Normalizes an RFMS order number the same way baseOrderNumber() does for po_lines.po_number
+// (strip a leading '#'), without the '-NNNN' line-suffix strip - gen_po_lines.order_number is
+// already the bare order number, with the line stored separately.
+function normalizeGenPoOrderNumber(orderNumber){
+  return String(orderNumber||'').replace(/^#/, '').trim();
+}
+
+// ---------- Key Date risk (Builder-division material ETA vs. Gen PO Key Date) ----------
+// A builder job can have several material PO lines (po_lines, different promise dates) and
+// several Gen PO lines (gen_po_lines, different key dates) sharing one RFMS order number.
+// Every promise-date x key-date pairing for that order is checked independently - flag any
+// pairing where the material is expected to arrive within KEY_DATE_RISK_BUFFER_DAYS of (or
+// after) the date the builder needs it, since that leaves little/no room for a further slip.
+function computeKeyDateRiskEvents(){
+  const builderByOrder = new Map();
+  state.poLines.forEach(po=>{
+    if(po.is_active === false || !po.promise_date) return;
+    if(String(po.division||'').trim().toUpperCase() !== 'BUILDER') return;
+    const orderNum = baseOrderNumber(po.po_number);
+    if(!orderNum) return;
+    if(!builderByOrder.has(orderNum)) builderByOrder.set(orderNum, []);
+    builderByOrder.get(orderNum).push(po);
+  });
+  if(!builderByOrder.size) return [];
+
+  const genPoByOrder = new Map();
+  state.genPoLines.forEach(g=>{
+    if(g.is_active === false || !g.key_date) return;
+    const orderNum = normalizeGenPoOrderNumber(g.order_number);
+    if(!orderNum || !builderByOrder.has(orderNum)) return;
+    if(!genPoByOrder.has(orderNum)) genPoByOrder.set(orderNum, []);
+    genPoByOrder.get(orderNum).push(g);
+  });
+
+  const events = [];
+  genPoByOrder.forEach((genPoLines, orderNum)=>{
+    const materialLines = builderByOrder.get(orderNum);
+    materialLines.forEach(po=>{
+      const promiseD = parseDateStr(po.promise_date);
+      if(!promiseD) return;
+      genPoLines.forEach(g=>{
+        const keyD = parseDateStr(g.key_date);
+        if(!keyD) return;
+        const bufferDays = daysBetween(keyD, promiseD); // positive = days of buffer before the key date
+        if(bufferDays > KEY_DATE_RISK_BUFFER_DAYS) return;
+        events.push({
+          po_number: po.po_number,
+          supplier: po.supplier,
+          store: po.store,
+          is_active: po.is_active,
+          sales_person: po.sales_person,
+          division: po.division,
+          old_date: po.promise_date,
+          new_date: g.key_date,
+          delta_days: bufferDays,
+          severity: 'keydate_risk',
+          batch_id: null,
+          batch_date: null,
+          batch_filename: null
+        });
+      });
+    });
+  });
+  return events;
 }
 
 async function loadEtaChanges(){
@@ -501,6 +569,8 @@ async function loadEtaChanges(){
       batch_filename: batch ? batch.source_filename : null
     });
   });
+
+  events.push(...computeKeyDateRiskEvents());
 
   return { batches, events };
 }
@@ -1992,6 +2062,9 @@ function renderEtaChanges(){
           across the last ${batches.length} upload${batches.length===1?'':'s'}
           (${new Date(oldestBatch.uploaded_at).toLocaleDateString()} – ${new Date(newestBatch.uploaded_at).toLocaleDateString()}).
           Only dates that moved <strong>later</strong> are shown — a date pulled in isn't flagged.
+          Also includes <strong>Key Date Risk</strong> rows: Builder-division jobs where the material ETA leaves
+          ${KEY_DATE_RISK_BUFFER_DAYS} day${KEY_DATE_RISK_BUFFER_DAYS===1?'':'s'} or less of buffer before that job's Gen PO Key Date
+          (current snapshot, not tied to a specific upload — no Upload Date shown for those).
         </p>
         <div style="display:flex;gap:8px;">
           <button type="button" class="btn secondary" id="notifySalespeopleBtn">Notify Salespeople</button>
@@ -2021,7 +2094,7 @@ function renderEtaChanges(){
         <tbody>
           ${rows.length ? rows.map(r=>`
             <tr class="po-row" data-po="${r.po_number}">
-              <td><span class="badge sev-${r.severity}">${r.severity.charAt(0).toUpperCase()+r.severity.slice(1)}</span></td>
+              <td><span class="badge sev-${r.severity}">${r.severity==='keydate_risk' ? 'Key Date Risk' : r.severity.charAt(0).toUpperCase()+r.severity.slice(1)}</span></td>
               <td>${r.store ?? '—'}</td>
               <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
               <td>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
@@ -2029,7 +2102,7 @@ function renderEtaChanges(){
               <td>${r.division || '—'}</td>
               <td>${fmtDate(r.old_date)}</td>
               <td>${fmtDate(r.new_date)}</td>
-              <td>${r.delta_days}d ${r.severity==='new'?'out':'later'}</td>
+              <td>${r.severity==='keydate_risk' ? (r.delta_days<=0 ? `${-r.delta_days}d overdue` : `${r.delta_days}d buffer`) : `${r.delta_days}d ${r.severity==='new'?'out':'later'}`}</td>
               <td>${r.batch_date ? new Date(r.batch_date).toLocaleDateString() : '—'}</td>
             </tr>
           `).join('') : `<tr><td colspan="10" class="empty">No qualifying ETA pushes in this window.</td></tr>`}
@@ -2142,6 +2215,8 @@ function buildNotifyEmailBody(name, list){
   sorted.forEach(e=>{
     const detail = e.severity === 'new'
       ? `new PO, ETA already ${e.delta_days}d out (${fmtDate(e.new_date)})`
+      : e.severity === 'keydate_risk'
+      ? `Builder Key Date risk - material ETA ${fmtDate(e.old_date)} vs. Key Date ${fmtDate(e.new_date)} (${e.delta_days<=0 ? 'already past the key date' : e.delta_days+'d buffer'})`
       : `${fmtDate(e.old_date)} -> ${fmtDate(e.new_date)} (${e.delta_days}d later, ${e.severity})`;
     lines.push(`- PO ${e.po_number} (Store ${e.store ?? '—'}, ${e.supplier || 'Unknown supplier'}): ${detail}`);
   });
