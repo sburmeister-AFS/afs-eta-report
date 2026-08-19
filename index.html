@@ -426,67 +426,36 @@ function severityOf(deltaDays){
   return 'slight'; // caller already filters out < 7
 }
 
-// Normalizes an RFMS order number the same way baseOrderNumber() does for po_lines.po_number
-// (strip a leading '#'), without the '-NNNN' line-suffix strip - gen_po_lines.order_number is
-// already the bare order number, with the line stored separately.
-function normalizeGenPoOrderNumber(orderNumber){
-  return String(orderNumber||'').replace(/^#/, '').trim();
-}
-
-// ---------- Key Date risk (Builder-division material ETA vs. Gen PO Key Date) ----------
-// A builder job can have several material PO lines (po_lines, different promise dates) and
-// several Gen PO lines (gen_po_lines, different key dates) sharing one RFMS order number.
-// Every promise-date x key-date pairing for that order is checked independently - flag any
-// pairing where the material is expected to arrive within KEY_DATE_RISK_BUFFER_DAYS of (or
-// after) the date the builder needs it, since that leaves little/no room for a further slip.
+// ---------- Key Date risk (Builder-division material ETA vs. that job's Key Date) ----------
+// Key Date comes from the same sales-data upload as Division/Sales Person (see
+// parseAndProcessSalesFile) - it lives directly on the po_lines row, so this is a plain
+// per-row check, not a cross-table join. Flag any Builder-division line where the material
+// is expected to arrive within KEY_DATE_RISK_BUFFER_DAYS of (or after) the job's Key Date,
+// since that leaves little/no room for a further slip.
 function computeKeyDateRiskEvents(){
-  const builderByOrder = new Map();
-  state.poLines.forEach(po=>{
-    if(po.is_active === false || !po.promise_date) return;
-    if(String(po.division||'').trim().toUpperCase() !== 'BUILDER') return;
-    const orderNum = baseOrderNumber(po.po_number);
-    if(!orderNum) return;
-    if(!builderByOrder.has(orderNum)) builderByOrder.set(orderNum, []);
-    builderByOrder.get(orderNum).push(po);
-  });
-  if(!builderByOrder.size) return [];
-
-  const genPoByOrder = new Map();
-  state.genPoLines.forEach(g=>{
-    if(g.is_active === false || !g.key_date) return;
-    const orderNum = normalizeGenPoOrderNumber(g.order_number);
-    if(!orderNum || !builderByOrder.has(orderNum)) return;
-    if(!genPoByOrder.has(orderNum)) genPoByOrder.set(orderNum, []);
-    genPoByOrder.get(orderNum).push(g);
-  });
-
   const events = [];
-  genPoByOrder.forEach((genPoLines, orderNum)=>{
-    const materialLines = builderByOrder.get(orderNum);
-    materialLines.forEach(po=>{
-      const promiseD = parseDateStr(po.promise_date);
-      if(!promiseD) return;
-      genPoLines.forEach(g=>{
-        const keyD = parseDateStr(g.key_date);
-        if(!keyD) return;
-        const bufferDays = daysBetween(keyD, promiseD); // positive = days of buffer before the key date
-        if(bufferDays > KEY_DATE_RISK_BUFFER_DAYS) return;
-        events.push({
-          po_number: po.po_number,
-          supplier: po.supplier,
-          store: po.store,
-          is_active: po.is_active,
-          sales_person: po.sales_person,
-          division: po.division,
-          old_date: po.promise_date,
-          new_date: g.key_date,
-          delta_days: bufferDays,
-          severity: 'keydate_risk',
-          batch_id: null,
-          batch_date: null,
-          batch_filename: null
-        });
-      });
+  state.poLines.forEach(po=>{
+    if(po.is_active === false || !po.promise_date || !po.key_date) return;
+    if(String(po.division||'').trim().toUpperCase() !== 'BUILDER') return;
+    const promiseD = parseDateStr(po.promise_date);
+    const keyD = parseDateStr(po.key_date);
+    if(!promiseD || !keyD) return;
+    const bufferDays = daysBetween(keyD, promiseD); // positive = days of buffer before the key date
+    if(bufferDays > KEY_DATE_RISK_BUFFER_DAYS) return;
+    events.push({
+      po_number: po.po_number,
+      supplier: po.supplier,
+      store: po.store,
+      is_active: po.is_active,
+      sales_person: po.sales_person,
+      division: po.division,
+      old_date: po.promise_date,
+      new_date: po.key_date,
+      delta_days: bufferDays,
+      severity: 'keydate_risk',
+      batch_id: null,
+      batch_date: null,
+      batch_filename: null
     });
   });
   return events;
@@ -2063,8 +2032,8 @@ function renderEtaChanges(){
           (${new Date(oldestBatch.uploaded_at).toLocaleDateString()} – ${new Date(newestBatch.uploaded_at).toLocaleDateString()}).
           Only dates that moved <strong>later</strong> are shown — a date pulled in isn't flagged.
           Also includes <strong>Key Date Risk</strong> rows: Builder-division jobs where the material ETA leaves
-          ${KEY_DATE_RISK_BUFFER_DAYS} day${KEY_DATE_RISK_BUFFER_DAYS===1?'':'s'} or less of buffer before that job's Gen PO Key Date
-          (current snapshot, not tied to a specific upload — no Upload Date shown for those).
+          ${KEY_DATE_RISK_BUFFER_DAYS} day${KEY_DATE_RISK_BUFFER_DAYS===1?'':'s'} or less of buffer before that job's Key Date
+          (from the sales data upload; current snapshot, not tied to a specific upload — no Upload Date shown for those).
         </p>
         <div style="display:flex;gap:8px;">
           <button type="button" class="btn secondary" id="notifySalespeopleBtn">Notify Salespeople</button>
@@ -2366,7 +2335,7 @@ function cssEscape(s){
 // ============================================================
 function renderSalesResultsPanel(){
   const active = state.poLines.filter(r=>r.is_active);
-  const hasSalesData = (r)=> !!(r.sales_person || r.sales_entered_by || r.division);
+  const hasSalesData = (r)=> !!(r.sales_person || r.sales_entered_by || r.division || r.key_date);
   const matched = active.filter(hasSalesData);
   const unmatched = active.filter(r=>!hasSalesData(r));
   const rows = [...matched, ...unmatched]; // matched first, so the interesting ones surface without scrolling
@@ -2377,7 +2346,7 @@ function renderSalesResultsPanel(){
   return `
     <div class="panel">
       <h2 style="margin-top:0;">Sales Data Match Results</h2>
-      <p style="color:var(--muted);font-size:13px;">Which open POs currently have Sales Person / Entered By / Division filled in from a sales data upload, and which don't.</p>
+      <p style="color:var(--muted);font-size:13px;">Which open POs currently have Sales Person / Entered By / Division / Key Date filled in from a sales data upload, and which don't.</p>
       <div class="stat-row">
         <div class="stat"><div class="num">${active.length.toLocaleString()}</div><div class="label">Open POs</div></div>
         <div class="stat"><div class="num" style="color:var(--good);">${matched.length.toLocaleString()}</div><div class="label">Matched</div></div>
@@ -2392,6 +2361,7 @@ function renderSalesResultsPanel(){
           <th>Sales Person</th>
           <th>Entered By</th>
           <th>Division</th>
+          <th>Key Date</th>
         </tr></thead>
         <tbody>
           ${shown.length ? shown.map(r=>`
@@ -2403,8 +2373,9 @@ function renderSalesResultsPanel(){
               <td>${r.sales_person || ''}</td>
               <td>${r.sales_entered_by || ''}</td>
               <td>${r.division || ''}</td>
+              <td>${fmtDate(r.key_date)}</td>
             </tr>
-          `).join('') : `<tr><td colspan="7" class="empty">No open POs.</td></tr>`}
+          `).join('') : `<tr><td colspan="8" class="empty">No open POs.</td></tr>`}
         </tbody>
       </table>
       ${(rows.length > CAP && !state.showAllSalesResults) ? `
@@ -2464,7 +2435,7 @@ function renderUpload(){
     </div>
     <div class="panel">
       <h2 style="margin-top:0;">Upload Sales Data</h2>
-      <p style="color:var(--muted);font-size:13px;">Drop either the raw "Open Orders Detailed" export (.xlsx) from RFMS, or the combined CSV produced by the offline ExtractSalesData.ps1 script (recommended - run it against a folder of exports first to check the data before it goes anywhere near this app). Matches each order to POs by order number and fills in Sales Person, Entered By, and Division - shown as a tooltip when you hover a PO number on All Open POs. Independent of the two reports above; uploads immediately.</p>
+      <p style="color:var(--muted);font-size:13px;">Drop either the raw "Open Orders Detailed" export (.xlsx) from RFMS, or the combined CSV produced by the offline ExtractSalesData.ps1 script (recommended - run it against a folder of exports first to check the data before it goes anywhere near this app). Matches each order to POs by order number and fills in Sales Person, Entered By, Division, and Key Date - shown as a tooltip when you hover a PO number on All Open POs. Key Date also feeds the ETA Changes tab's Key Date Risk check for Builder-division jobs. Independent of the two reports above; uploads immediately.</p>
       <p style="color:var(--muted);font-size:12.5px;font-style:italic;">${state.lastSalesUploadAt ? `Last uploaded: ${new Date(state.lastSalesUploadAt).toLocaleString()}${state.lastSalesUploadFilename ? ` (${state.lastSalesUploadFilename})` : ''}` : 'Never uploaded yet.'}</p>
       <div class="dropzone" id="salesDropzone">
         <input type="file" id="salesFileInput" accept=".csv,.xlsx,.xls" class="hidden">
@@ -2850,7 +2821,12 @@ function parseDateCell(v){
   }
   const s = String(v).trim();
   if(!s) return null;
-  const d = new Date(s);
+  // A bare 'YYYY-MM-DD' string (e.g. from the sales-data CSV extractor script) parses as UTC
+  // midnight per the JS spec, which getFullYear/getMonth/getDate below would then read back
+  // in local time - shifting the date a day in either direction depending on timezone. Forcing
+  // a local-midnight parse (matching parseDateStr's convention elsewhere in this file) avoids that.
+  const isoMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  const d = isoMatch ? new Date(s + 'T00:00:00') : new Date(s);
   return isNaN(d) ? null : toDateStr(d);
 }
 function numOrNull(v){
@@ -3043,6 +3019,7 @@ function salesInfoTooltip(row){
   if(row.sales_person) parts.push(`Sales Person: ${row.sales_person}`);
   if(row.sales_entered_by) parts.push(`Entered By: ${row.sales_entered_by}`);
   if(row.division) parts.push(`Division: ${row.division}`);
+  if(row.key_date) parts.push(`Key Date: ${fmtDate(row.key_date)}`);
   return parts.join('\n');
 }
 
@@ -3063,7 +3040,7 @@ function parseSalesGrid(grid){
     if(typeof first !== 'string' || !first.trim().startsWith('Order #:')) continue;
     const orderNum = first.replace(/Order #:\s*/,'').trim();
     if(!orderNum) continue;
-    const info = { sales_person: null, sales_entered_by: null, division: null };
+    const info = { sales_person: null, sales_entered_by: null, division: null, key_date: null };
     const windowEnd = Math.min(r + 10, grid.length - 1);
     for(let rr = r; rr <= windowEnd; rr++){
       const wrow = grid[rr] || [];
@@ -3073,6 +3050,10 @@ function parseSalesGrid(grid){
         const t = cell.trim();
         if(t === 'Salesperson 1:' && wrow[cc+1]) info.sales_person = String(wrow[cc+1]).trim() || null;
         else if(t === 'Customer Type:' && wrow[cc+1]) info.division = String(wrow[cc+1]).trim() || null;
+        // Cell text comes through display-formatted (sheet_to_json ran with raw:false), so this
+        // is a normal date string like "8/25/2026", not a raw Excel serial - parseDateCell's
+        // string branch handles it fine.
+        else if(t === 'Key Date:' && wrow[cc+1]) info.key_date = parseDateCell(wrow[cc+1]);
         else if(t.startsWith('Entered By:')){
           // value is "AMFS-VSRV-RDPn:firstname.lastname" in the same cell as the label
           const raw = t.slice('Entered By:'.length).trim();
@@ -3096,7 +3077,9 @@ async function getSalesMapFromXlsx(file){
 }
 
 // Pre-extracted CSV from the offline ExtractSalesData.ps1 script: a flat table with headers
-// "Order #", "Sales Person", "Entered By", "Division" - one row per order, no block-parsing needed.
+// "Order #", "Sales Person", "Entered By", "Division", "Key Date" - one row per order, no
+// block-parsing needed. Key Date is written as an ISO yyyy-MM-dd string by that script, so
+// parseDateCell's string branch is all that's needed here too.
 function getSalesMapFromCsv(file){
   return new Promise((resolve, reject)=>{
     const map = new Map();
@@ -3110,7 +3093,8 @@ function getSalesMapFromCsv(file){
           map.set(orderNum, {
             sales_person: (r['Sales Person']||'').trim() || null,
             sales_entered_by: (r['Entered By']||'').trim() || null,
-            division: (r['Division']||'').trim() || null
+            division: (r['Division']||'').trim() || null,
+            key_date: parseDateCell((r['Key Date']||'').trim())
           });
         });
         resolve(map);
@@ -3132,7 +3116,7 @@ async function parseAndProcessSalesFile(file){
       const base = baseOrderNumber(row.po_number);
       const info = base ? salesMap.get(base) : null;
       if(!info) continue;
-      if(row.sales_person !== info.sales_person || row.sales_entered_by !== info.sales_entered_by || row.division !== info.division){
+      if(row.sales_person !== info.sales_person || row.sales_entered_by !== info.sales_entered_by || row.division !== info.division || row.key_date !== info.key_date){
         toUpdate.push([row.po_number, info]);
       }
     }
@@ -3142,7 +3126,7 @@ async function parseAndProcessSalesFile(file){
     for(let i=0; i<toUpdate.length; i+=CONCURRENCY){
       const batch = toUpdate.slice(i, i+CONCURRENCY);
       await Promise.all(batch.map(([po, info])=>
-        sb.from('po_lines').update({ sales_person: info.sales_person, sales_entered_by: info.sales_entered_by, division: info.division }).eq('po_number', po)
+        sb.from('po_lines').update({ sales_person: info.sales_person, sales_entered_by: info.sales_entered_by, division: info.division, key_date: info.key_date }).eq('po_number', po)
       ));
       done += batch.length;
       showProgress(`Updating PO lines… ${done.toLocaleString()} / ${toUpdate.length.toLocaleString()}`, 20 + (done/Math.max(toUpdate.length,1))*70);

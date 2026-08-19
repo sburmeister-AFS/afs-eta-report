@@ -49,7 +49,8 @@ create table if not exists public.po_lines (
   worked_at timestamptz,
   sales_person text, -- from the separate Open Orders Detailed sales export, matched by base order number (po_number minus its "-NNNN" line suffix)
   sales_entered_by text,
-  division text -- "Customer Type" in that export (BUILDER, HOMEOWNER, etc.)
+  division text, -- "Customer Type" in that export (BUILDER, HOMEOWNER, etc.)
+  key_date date -- "Key Date" in that same sales export - the date the job needs the material by
 );
 
 -- Safe to re-run against an existing database that predates the amount_received column.
@@ -57,6 +58,7 @@ alter table public.po_lines add column if not exists amount_received numeric;
 alter table public.po_lines add column if not exists sales_person text;
 alter table public.po_lines add column if not exists sales_entered_by text;
 alter table public.po_lines add column if not exists division text;
+alter table public.po_lines add column if not exists key_date date;
 
 create index if not exists po_lines_ordered_by_idx on public.po_lines (ordered_by);
 create index if not exists po_lines_store_idx on public.po_lines (store);
