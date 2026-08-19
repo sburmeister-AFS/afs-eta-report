@@ -523,15 +523,16 @@ async function loadEtaChanges(){
     const deltaDays = daysBetween(newD, oldD); // positive = pushed later
     if(deltaDays < 7) return; // not a push, or below the Slight floor
     const po = poByNumber.get(h.po_number);
+    if(!po || po.is_active === false) return; // closed since - nothing left to chase
     const batch = batchById.get(h.batch_id);
     events.push({
       po_number: h.po_number,
-      supplier: po ? po.supplier : null,
-      store: po ? po.store : null,
-      is_active: po ? po.is_active : null,
-      sales_person: po ? po.sales_person : null,
-      division: po ? po.division : null,
-      key_date: po ? po.key_date : null,
+      supplier: po.supplier,
+      store: po.store,
+      is_active: po.is_active,
+      sales_person: po.sales_person,
+      division: po.division,
+      key_date: po.key_date,
       old_date: pdChange.old,
       new_date: pdChange.new,
       delta_days: deltaDays,
@@ -2070,7 +2071,7 @@ function renderEtaChanges(){
               <td><span class="badge sev-${r.severity}">${r.severity==='keydate_risk' ? 'Key Date Risk' : r.severity.charAt(0).toUpperCase()+r.severity.slice(1)}</span></td>
               <td>${r.store ?? '—'}</td>
               <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
-              <td>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
+              <td>${r.po_number} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
               <td>${r.sales_person || '—'}</td>
               <td>${r.division || '—'}</td>
               <td>${fmtDate(r.key_date)}</td>
