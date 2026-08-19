@@ -2839,6 +2839,15 @@ function genPoSelectedDataRows(){
 function parseDateCell(v){
   if(v === null || v === undefined || v === '') return null;
   if(v instanceof Date) return isNaN(v) ? null : toDateStr(v);
+  // Excel serial date (days since 1899-12-30, the standard JS conversion that already
+  // accounts for Excel's 1900 leap-year bug) - happens when the source cell holds a raw
+  // number rather than a value SheetJS recognized as date-formatted. Without this, a cell
+  // like 46304 fell through to `new Date("46304")`, which JS parses as the literal year
+  // 46304 instead of the real date it represents (~2026).
+  if(typeof v === 'number' && isFinite(v)){
+    const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+    return isNaN(d) ? null : toDateStr(d);
+  }
   const s = String(v).trim();
   if(!s) return null;
   const d = new Date(s);
