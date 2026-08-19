@@ -449,6 +449,7 @@ function computeKeyDateRiskEvents(){
       is_active: po.is_active,
       sales_person: po.sales_person,
       division: po.division,
+      key_date: po.key_date,
       old_date: po.promise_date,
       new_date: po.key_date,
       delta_days: bufferDays,
@@ -501,6 +502,7 @@ async function loadEtaChanges(){
         is_active: po.is_active,
         sales_person: po.sales_person,
         division: po.division,
+        key_date: po.key_date,
         old_date: null,
         new_date: po.promise_date,
         delta_days: daysOut,
@@ -529,6 +531,7 @@ async function loadEtaChanges(){
       is_active: po ? po.is_active : null,
       sales_person: po ? po.sales_person : null,
       division: po ? po.division : null,
+      key_date: po ? po.key_date : null,
       old_date: pdChange.old,
       new_date: pdChange.new,
       delta_days: deltaDays,
@@ -2055,6 +2058,7 @@ function renderEtaChanges(){
           <th data-col="po_number">PO Number</th>
           <th data-col="sales_person">Sales Person</th>
           <th data-col="division">Division</th>
+          <th data-col="key_date">Key Date</th>
           <th data-col="old_date">Previous ETA</th>
           <th data-col="new_date">New ETA</th>
           <th data-col="delta_days">Days</th>
@@ -2069,12 +2073,13 @@ function renderEtaChanges(){
               <td>${r.po_number}${r.is_active===false?' <span class="badge blank">closed</span>':''} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
               <td>${r.sales_person || '—'}</td>
               <td>${r.division || '—'}</td>
+              <td>${fmtDate(r.key_date)}</td>
               <td>${fmtDate(r.old_date)}</td>
               <td>${fmtDate(r.new_date)}</td>
               <td>${r.severity==='keydate_risk' ? (r.delta_days<=0 ? `${-r.delta_days}d overdue` : `${r.delta_days}d buffer`) : `${r.delta_days}d ${r.severity==='new'?'out':'later'}`}</td>
               <td>${r.batch_date ? new Date(r.batch_date).toLocaleDateString() : '—'}</td>
             </tr>
-          `).join('') : `<tr><td colspan="10" class="empty">No qualifying ETA pushes in this window.</td></tr>`}
+          `).join('') : `<tr><td colspan="11" class="empty">No qualifying ETA pushes in this window.</td></tr>`}
         </tbody>
       </table>
     </div>
