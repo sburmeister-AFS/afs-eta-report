@@ -1994,6 +1994,15 @@ function filteredChangesEvents(){
   return activeSeverities.length ? events.filter(e=>activeSeverities.includes(e.severity)) : events.slice();
 }
 
+// Shared between the table render and the Excel exports, so the two can't drift apart.
+function severityLabel(severity){
+  return severity==='keydate_risk' ? 'Key Date Risk' : severity.charAt(0).toUpperCase()+severity.slice(1);
+}
+function deltaDaysLabel(r){
+  if(r.severity === 'keydate_risk') return r.delta_days<=0 ? `${-r.delta_days}d overdue` : `${r.delta_days}d buffer`;
+  return `${r.delta_days}d ${r.severity==='new'?'out':'later'}`;
+}
+
 function renderEtaChanges(){
   if(state.changesLoading){
     return `<div class="panel"><p style="color:var(--muted);">Loading recent ETA changes…</p></div>`;
@@ -2068,7 +2077,7 @@ function renderEtaChanges(){
         <tbody>
           ${rows.length ? rows.map(r=>`
             <tr class="po-row" data-po="${r.po_number}">
-              <td><span class="badge sev-${r.severity}">${r.severity==='keydate_risk' ? 'Key Date Risk' : r.severity.charAt(0).toUpperCase()+r.severity.slice(1)}</span></td>
+              <td><span class="badge sev-${r.severity}">${severityLabel(r.severity)}</span></td>
               <td>${r.store ?? '—'}</td>
               <td class="td-truncate td-truncate-sm" title="${escapeAttr(r.supplier)}">${r.supplier || '—'}</td>
               <td>${r.po_number} <button type="button" class="copy-po-btn" data-po="${r.po_number}" title="Copy PO number">📋</button></td>
@@ -2077,7 +2086,7 @@ function renderEtaChanges(){
               <td>${fmtDate(r.key_date)}</td>
               <td>${fmtDate(r.old_date)}</td>
               <td>${fmtDate(r.new_date)}</td>
-              <td>${r.severity==='keydate_risk' ? (r.delta_days<=0 ? `${-r.delta_days}d overdue` : `${r.delta_days}d buffer`) : `${r.delta_days}d ${r.severity==='new'?'out':'later'}`}</td>
+              <td>${deltaDaysLabel(r)}</td>
               <td>${r.batch_date ? new Date(r.batch_date).toLocaleDateString() : '—'}</td>
             </tr>
           `).join('') : `<tr><td colspan="11" class="empty">No qualifying ETA pushes in this window.</td></tr>`}
@@ -2199,6 +2208,69 @@ function buildNotifyEmailBody(name, list){
   return lines.join('\n');
 }
 
+// ---------- Excel export (mailto: can't carry attachments, so this downloads a .xlsx
+// alongside the draft for the user to attach by hand) ----------
+function changeEventToExportRow(e){
+  return {
+    Severity: severityLabel(e.severity),
+    Store: e.store ?? '',
+    Supplier: e.supplier || '',
+    'PO Number': e.po_number,
+    'Sales Person': e.sales_person || '',
+    Division: e.division || '',
+    'Key Date': e.key_date ? fmtDate(e.key_date) : '',
+    'Previous ETA': e.old_date ? fmtDate(e.old_date) : '',
+    'New ETA': e.new_date ? fmtDate(e.new_date) : '',
+    Days: deltaDaysLabel(e),
+    'Upload Date': e.batch_date ? new Date(e.batch_date).toLocaleDateString() : ''
+  };
+}
+
+// Excel sheet names: max 31 chars, no \ / ? * [ ] :, can't repeat - dedupe with a " (2)"-style
+// suffix rather than letting XLSX.utils.book_append_sheet throw on a collision.
+function sanitizeSheetName(name, usedNames){
+  const base = String(name||'Unknown').replace(/[\\\/\?\*\[\]:]/g, ' ').trim().slice(0, 31) || 'Unknown';
+  let candidate = base;
+  let i = 2;
+  while(usedNames.has(candidate)){
+    const suffix = ` (${i})`;
+    candidate = base.slice(0, 31 - suffix.length) + suffix;
+    i++;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
+function sanitizeFilenamePart(name){
+  return String(name||'unknown').replace(/[\\\/:*?"<>|]/g, '').trim().replace(/\s+/g, '-') || 'unknown';
+}
+
+// sheets: [{ name, rows }] - rows are plain objects, one per Excel row.
+function downloadExcelWorkbook(filename, sheets){
+  const wb = XLSX.utils.book_new();
+  const usedNames = new Set();
+  sheets.forEach(({ name, rows })=>{
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, sanitizeSheetName(name, usedNames));
+  });
+  XLSX.writeFile(wb, filename);
+}
+
+// One combined workbook, one tab per salesperson, covering every currently-loaded Key Date
+// Risk (Builder) row - independent of whatever severity filter is active on the page, since
+// this is meant as a standalone "the whole Builder risk picture" export, not a per-draft one.
+function downloadKeyDateRiskWorkbook(){
+  const events = (state.changesData && state.changesData.events) || [];
+  const riskEvents = events.filter(e=>e.severity === 'keydate_risk');
+  if(!riskEvents.length) return;
+  const groups = groupChangesBySalesperson(riskEvents);
+  const names = Array.from(groups.keys()).sort((a,b)=>a.localeCompare(b));
+  const sheets = names.map(name=>({
+    name: titleCase(name),
+    rows: groups.get(name).map(changeEventToExportRow)
+  }));
+  downloadExcelWorkbook('builder-key-date-risk.xlsx', sheets);
+}
+
 // Keeps the subject line readable when someone has a lot of changed POs.
 function subjectPoList(list){
   const MAX = 5;
@@ -2216,6 +2288,10 @@ function openMailtoDraft(name, email, list){
   // own user gesture rather than clobbering/reusing the previous navigation's.
   const win = window.open(mailtoUrl, '_blank');
   if(win) setTimeout(()=>{ try{ win.close(); }catch(e){} }, 500); // mailto leaves a blank tab in some browsers
+  // mailto: can't carry an attachment, so drop the same data as a .xlsx the user attaches by hand.
+  downloadExcelWorkbook(`eta-notify-${sanitizeFilenamePart(name)}.xlsx`, [
+    { name: titleCase(name), rows: list.map(changeEventToExportRow) }
+  ]);
 }
 
 function openNotifySalespeopleModal(){
@@ -2233,12 +2309,20 @@ function openNotifySalespeopleModal(){
     return;
   }
 
+  const hasKeyDateRisk = ((state.changesData && state.changesData.events) || []).some(e=>e.severity === 'keydate_risk');
+
   showModal(`
     <h2>Notify Salespeople</h2>
     <p style="color:var(--muted);font-size:13px;">
       ${names.length} salesperson${names.length===1?'':'s'} across ${namedCount} change${namedCount===1?'':'s'} currently shown${skipped ? ` (${skipped} change${skipped===1?'':'s'} skipped — no Salesperson on file)` : ''}.
       Email addresses are guessed as firstname.lastname@afsgroup.com — check each one before opening.
+      Opening a draft also downloads a matching .xlsx with that person's PO details — mailto: links can't carry attachments, so attach it to the draft yourself before sending.
     </p>
+    ${hasKeyDateRisk ? `
+      <div style="margin-bottom:10px;">
+        <button type="button" class="btn secondary" id="downloadKeyDateRiskBtn">Download Builder Key Date Risk (Excel, one tab per salesperson)</button>
+      </div>
+    ` : ''}
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
       <label style="font-size:13px;"><input type="checkbox" id="notifySelectAll" checked> Select all</label>
       <button type="button" class="btn" id="notifyOpenSelectedBtn">Open Selected Drafts (<span id="notifySelectedCount">${names.length}</span>)</button>
@@ -2264,6 +2348,8 @@ function openNotifySalespeopleModal(){
       }).join('')}
     </div>
   `);
+
+  document.getElementById('downloadKeyDateRiskBtn')?.addEventListener('click', downloadKeyDateRiskWorkbook);
 
   function updateSelectedCount(){
     const checked = document.querySelectorAll('.notify-person-checkbox:checked').length;
