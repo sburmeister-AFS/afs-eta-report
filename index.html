@@ -426,6 +426,14 @@ function severityOf(deltaDays){
   return 'slight'; // caller already filters out < 7
 }
 
+// A Builder job with a Key Date on file is tracked by that Key Date (see
+// computeKeyDateRiskEvents below) instead of by plain promise-date pushbacks - once Key Date
+// Risk is watching it, a separate pushback notice would just be noise. Non-Builder POs, and
+// Builder POs with no Key Date yet, keep the normal pushback notices.
+function isBuilderWithKeyDate(po){
+  return !!po.key_date && String(po.division||'').trim().toUpperCase() === 'BUILDER';
+}
+
 // ---------- Key Date risk (Builder-division material ETA vs. that job's Key Date) ----------
 // Key Date comes from the same sales-data upload as Division/Sales Person (see
 // parseAndProcessSalesFile) - it lives directly on the po_lines row, so this is a plain
@@ -435,8 +443,7 @@ function severityOf(deltaDays){
 function computeKeyDateRiskEvents(){
   const events = [];
   state.poLines.forEach(po=>{
-    if(po.is_active === false || !po.promise_date || !po.key_date) return;
-    if(String(po.division||'').trim().toUpperCase() !== 'BUILDER') return;
+    if(po.is_active === false || !po.promise_date || !isBuilderWithKeyDate(po)) return;
     const promiseD = parseDateStr(po.promise_date);
     const keyD = parseDateStr(po.key_date);
     if(!promiseD || !keyD) return;
@@ -491,7 +498,7 @@ async function loadEtaChanges(){
   historyRows.forEach(h=>{
     if(h.event_type === 'created'){
       const po = poByNumber.get(h.po_number);
-      if(!po || po.is_active === false || !po.promise_date) return;
+      if(!po || po.is_active === false || !po.promise_date || isBuilderWithKeyDate(po)) return;
       const daysOut = -pastDaysOf(po); // pastDaysOf is negative for a future date
       if(daysOut <= NEW_PO_LEAD_THRESHOLD_DAYS) return;
       const batch = batchById.get(h.batch_id);
@@ -524,6 +531,7 @@ async function loadEtaChanges(){
     if(deltaDays < 7) return; // not a push, or below the Slight floor
     const po = poByNumber.get(h.po_number);
     if(!po || po.is_active === false) return; // closed since - nothing left to chase
+    if(isBuilderWithKeyDate(po)) return; // tracked via Key Date Risk instead
     const batch = batchById.get(h.batch_id);
     events.push({
       po_number: h.po_number,
@@ -2047,6 +2055,7 @@ function renderEtaChanges(){
           Also includes <strong>Key Date Risk</strong> rows: Builder-division jobs where the material ETA leaves
           ${KEY_DATE_RISK_BUFFER_DAYS} day${KEY_DATE_RISK_BUFFER_DAYS===1?'':'s'} or less of buffer before that job's Key Date
           (from the sales data upload; current snapshot, not tied to a specific upload — no Upload Date shown for those).
+          A Builder PO with a Key Date on file is tracked there instead of here — it won't also show up as a plain pushback.
         </p>
         <div style="display:flex;gap:8px;">
           <button type="button" class="btn secondary" id="notifySalespeopleBtn">Notify Salespeople</button>
