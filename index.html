@@ -3056,10 +3056,10 @@ function parseSalesGrid(grid){
         const t = cell.trim();
         if(t === 'Salesperson 1:' && wrow[cc+1]) info.sales_person = String(wrow[cc+1]).trim() || null;
         else if(t === 'Customer Type:' && wrow[cc+1]) info.division = String(wrow[cc+1]).trim() || null;
-        // Cell text comes through display-formatted (sheet_to_json ran with raw:false), so this
-        // is a normal date string like "8/25/2026", not a raw Excel serial - parseDateCell's
-        // string branch handles it fine.
-        else if(t === 'Key Date:' && wrow[cc+1]) info.key_date = parseDateCell(wrow[cc+1]);
+        // Unlike Salesperson 1:/Customer Type: (label and value in separate adjacent cells),
+        // Key Date is formatted like Entered By: - label and value together in one cell, e.g.
+        // "Key Date: 9/16/2026" - confirmed 2026-08-20 against a real export.
+        else if(t.startsWith('Key Date:')) info.key_date = parseDateCell(t.slice('Key Date:'.length).trim());
         else if(t.startsWith('Entered By:')){
           // value is "AMFS-VSRV-RDPn:firstname.lastname" in the same cell as the label
           const raw = t.slice('Entered By:'.length).trim();
