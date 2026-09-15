@@ -2293,7 +2293,9 @@ function openMailtoDraft(name, email, list){
 }
 
 function openNotifySalespeopleModal(){
-  const rows = filteredChangesEvents();
+  // Key Date Risk rows go out via the dedicated "Download Builder Key Date Risk" export below
+  // instead - a salesperson doesn't need the same PO flagged twice.
+  const rows = filteredChangesEvents().filter(e=>e.severity !== 'keydate_risk');
   const groups = groupChangesBySalesperson(rows);
   const namedCount = Array.from(groups.values()).reduce((sum,list)=>sum+list.length, 0);
   const skipped = rows.length - namedCount;
