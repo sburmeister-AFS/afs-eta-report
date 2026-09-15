@@ -2191,7 +2191,7 @@ function buildNotifyEmailBody(name, list){
   const lines = [
     `Hi ${firstName},`,
     '',
-    `The following ${sorted.length} PO${sorted.length===1?'':'s'} need your attention on a recent upload:`,
+    `The following PO(s) have met the notification requirements due to a change in their ETA:`,
     ''
   ];
   sorted.forEach(e=>{
@@ -2202,7 +2202,7 @@ function buildNotifyEmailBody(name, list){
       : `${fmtDate(e.old_date)} -> ${fmtDate(e.new_date)} (${e.delta_days}d later, ${e.severity})`;
     lines.push(`- PO ${e.po_number} (Store ${e.store ?? '—'}, ${e.supplier || 'Unknown supplier'}): ${detail}`);
   });
-  lines.push('', 'Let me know if you have questions.');
+  lines.push('', 'Please note this is an automated email notifying you of an ETA change. If you require more assistance or information, please contact orders@afsgroup.com');
   return lines.join('\n');
 }
 
