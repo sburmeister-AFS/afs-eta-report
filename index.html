@@ -2167,12 +2167,23 @@ function titleCase(s){
 
 // Best-effort only - first token as first name, last token as last name. No directory
 // lookup exists for Sales Person, so this is a guess the user can correct in the modal
-// before opening each draft.
-function guessEmailFromName(name){
+// before opening each draft. Store 2 mixes two conventions (firstname.lastname AND
+// firstinitiallastname, e.g. Melissa Boehm -> mboehm@afsgroup.com), so callers for Store 2
+// people should also request the alt guess via guessEmailOptions below.
+function guessEmailFromName(name, altFormat){
   const parts = String(name||'').trim().toLowerCase().split(/\s+/).filter(Boolean);
   if(!parts.length) return '';
   if(parts.length === 1) return `${parts[0]}@afsgroup.com`;
+  if(altFormat) return `${parts[0][0]}${parts[parts.length-1]}@afsgroup.com`;
   return `${parts[0]}.${parts[parts.length-1]}@afsgroup.com`;
+}
+
+// events: this person's change events. Returns a comma-joined list of guessed addresses -
+// just the standard firstname.lastname guess, plus the firstinitiallastname alt for Store 2.
+function guessEmailOptions(name, events){
+  const options = [guessEmailFromName(name)];
+  if((events||[]).some(e=>String(e.store) === '2')) options.push(guessEmailFromName(name, true));
+  return options.join(', ');
 }
 
 function groupChangesBySalesperson(events){
@@ -2341,7 +2352,7 @@ function openNotifySalespeopleModal(){
               </label>
               <span style="color:var(--muted);font-size:12.5px;" class="notify-person-status">${list.length} PO${list.length===1?'':'s'}</span>
             </div>
-            <input type="email" id="${inputId}" value="${escapeAttr(guessEmailFromName(name))}" style="width:100%;margin-top:6px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
+            <input type="email" multiple id="${inputId}" value="${escapeAttr(guessEmailOptions(name, list))}" style="width:100%;margin-top:6px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
             <button type="button" class="btn secondary notify-draft-btn" data-name="${escapeAttr(name)}" data-input="${inputId}" style="margin-top:8px;">Open Draft</button>
           </div>
         `;
