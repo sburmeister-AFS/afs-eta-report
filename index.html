@@ -2168,21 +2168,27 @@ function titleCase(s){
 // Best-effort only - first token as first name, last token as last name. No directory
 // lookup exists for Sales Person, so this is a guess the user can correct in the modal
 // before opening each draft. Store 2 mixes two conventions (firstname.lastname AND
-// firstinitiallastname, e.g. Melissa Boehm -> mboehm@afsgroup.com), so callers for Store 2
-// people should also request the alt guess via guessEmailOptions below.
-function guessEmailFromName(name, altFormat){
+// firstinitiallastname, both @afsgroup.com, e.g. Melissa Boehm -> mboehm@afsgroup.com).
+// Store 19 (Lewis Floor & Home) mixes firstname.lastname@afsgroup.com with
+// firstinitiallastname@lewisfloorandhome.com. guessEmailOptions below adds the right alt
+// per store.
+function guessEmailFromName(name, altFormat, domain){
   const parts = String(name||'').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const d = domain || 'afsgroup.com';
   if(!parts.length) return '';
-  if(parts.length === 1) return `${parts[0]}@afsgroup.com`;
-  if(altFormat) return `${parts[0][0]}${parts[parts.length-1]}@afsgroup.com`;
-  return `${parts[0]}.${parts[parts.length-1]}@afsgroup.com`;
+  if(parts.length === 1) return `${parts[0]}@${d}`;
+  if(altFormat) return `${parts[0][0]}${parts[parts.length-1]}@${d}`;
+  return `${parts[0]}.${parts[parts.length-1]}@${d}`;
 }
 
 // events: this person's change events. Returns a comma-joined list of guessed addresses -
-// just the standard firstname.lastname guess, plus the firstinitiallastname alt for Store 2.
+// the standard firstname.lastname@afsgroup.com guess, plus store-specific alts: Store 2's
+// firstinitiallastname@afsgroup.com, and Store 19's firstinitiallastname@lewisfloorandhome.com.
 function guessEmailOptions(name, events){
+  const stores = new Set((events||[]).map(e=>String(e.store)));
   const options = [guessEmailFromName(name)];
-  if((events||[]).some(e=>String(e.store) === '2')) options.push(guessEmailFromName(name, true));
+  if(stores.has('2')) options.push(guessEmailFromName(name, true));
+  if(stores.has('19')) options.push(guessEmailFromName(name, true, 'lewisfloorandhome.com'));
   return options.join(', ');
 }
 
