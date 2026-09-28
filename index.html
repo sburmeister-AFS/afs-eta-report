@@ -1541,9 +1541,11 @@ function renderGenPoBatchDiffPanel(){
 function matchesGenPoFilters(r, filters, excludeDim){
   if(filters.activeOnly && !r.is_active) return false;
   // The report's whole purpose is spotting lines that persist across uploads, not lines that
-  // just showed up today - hide those by default (days_outstanding is null only if
-  // first_seen_at is somehow missing, which shouldn't happen, so don't treat null as "new").
-  if(filters.hideNewToday && genPoDaysOutstanding(r) === 0) return false;
+  // just showed up in the latest one - hide those by default. Must compare against the latest
+  // batch id, not today's calendar date: the app is often viewed days after the last upload,
+  // by which point a line "born" in that upload no longer has days_outstanding===0 even though
+  // it's still only been seen once.
+  if(filters.hideNewToday && state.lastGenPoBatch && r.first_seen_batch_id === state.lastGenPoBatch.id) return false;
   if(excludeDim!=='supplier' && filters.supplier.length && !filters.supplier.includes(r.supplier)) return false;
   if(excludeDim!=='pc' && filters.pc.length && !filters.pc.includes(String(r.pc))) return false;
   if(excludeDim!=='holdType' && filters.holdType.length && !filters.holdType.includes(r.hold_type || '(none)')) return false;
@@ -1704,9 +1706,9 @@ function renderGenPo(){
       <div class="toolbar">
         <input type="text" id="f-genpo-search" placeholder="Search order # / style / job # / SKU…" value="${escapeAttr(state.genPoFilters.search)}" style="min-width:220px;">
         <label><input type="checkbox" id="f-genpo-activeOnly" ${state.genPoFilters.activeOnly?'checked':''}> Active only</label>
-        <label title="Hide lines that first appeared on today's upload - the point of this report is spotting lines that persist, not new ones"><input type="checkbox" id="f-genpo-hideNewToday" ${state.genPoFilters.hideNewToday?'checked':''}> Hide new today</label>
+        <label title="Hide lines that first appeared on the most recent upload - the point of this report is spotting lines that persist, not new ones"><input type="checkbox" id="f-genpo-hideNewToday" ${state.genPoFilters.hideNewToday?'checked':''}> Hide new in latest upload</label>
         <button class="btn secondary" id="genPoExportBtn">Export CSV</button>
-        <span style="margin-left:auto;color:var(--muted);font-size:12.5px;">${rows.length.toLocaleString()} line${rows.length===1?'':'s'}${(rows.length>CAP && !state.showAllGenPoRows)?` (showing first ${CAP})`:''}${newTodayHiddenCount>0?` · ${newTodayHiddenCount.toLocaleString()} new today hidden`:''}</span>
+        <span style="margin-left:auto;color:var(--muted);font-size:12.5px;">${rows.length.toLocaleString()} line${rows.length===1?'':'s'}${(rows.length>CAP && !state.showAllGenPoRows)?` (showing first ${CAP})`:''}${newTodayHiddenCount>0?` · ${newTodayHiddenCount.toLocaleString()} new in latest upload hidden`:''}</span>
       </div>
       <table>
         <thead><tr>
